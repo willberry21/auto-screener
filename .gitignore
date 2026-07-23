@@ -1,0 +1,8 @@
+# generated / local artifacts — the cloud run regenerates these each time
+site/
+data.json
+bars_cache.json
+proticker-data.json
+*.log
+__pycache__/
+.DS_Store
