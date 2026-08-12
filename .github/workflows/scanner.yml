@@ -1,10 +1,14 @@
-name: Auto Screener
+name: Runner Scanner
 
 # Runs entirely on GitHub's servers — no Mac, no app, nothing to keep awake.
-# RETIRED 2026-08-12: the trend-trader engine was Phase 1's placeholder brain.
-# The Runner Scanner (scanner.yml) now owns the site. Manual runs only.
+# Every 15 minutes through pre-market and the trading day, plus one evening
+# pass that scores the day's catches. (GitHub cron is UTC; the script itself
+# checks Eastern Time and skips detection outside 4:00am-4:10pm ET.)
 on:
-  workflow_dispatch: {}       # run-by-hand only; the daily schedule is retired
+  schedule:
+    - cron: "*/15 8-21 * * 1-5"   # ~4:00am-5:45pm ET during summer time
+    - cron: "15 22 * * 1-5"       # evening scoring pass
+  workflow_dispatch: {}            # run-by-hand button on the Actions tab
 
 permissions:
   contents: read
@@ -16,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  scan-and-deploy:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -26,8 +30,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build the dashboard
-        run: python engine.py
+      - name: Scan the market
+        run: python scanner.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
