@@ -115,7 +115,7 @@ def yahoo_session():
 
 FIELDS = ("symbol,longName,regularMarketPrice,regularMarketChangePercent,"
           "regularMarketVolume,preMarketPrice,preMarketChangePercent,"
-          "sharesOutstanding,marketCap,fullExchangeName")
+          "regularMarketDayHigh,sharesOutstanding,marketCap,fullExchangeName")
 
 
 def batch_quotes(symbols):
@@ -265,12 +265,23 @@ def detect(state, now):
         k = f"{now:%Y-%m-%d}|{sym}"
         if k in dets:
             continue
+        # freshness: is the stock still near its high of the day, or already
+        # collapsing off the top? (late catches proved to be the losers)
+        day_high = q.get("regularMarketDayHigh")
+        off_high = (price / day_high) if (day_high and session == "regular") else None
+        # day-2 pump: did we already catch this same ticker in the last 5 days?
+        # A re-pump usually means the first crowd is looking for its exit.
+        repeat = any(v["ticker"] == sym and v["date"] != f"{now:%Y-%m-%d}"
+                     and (now.date() - dt.date.fromisoformat(v["date"])).days <= 5
+                     for v in dets.values())
         dets[k] = {"ticker": sym, "date": f"{now:%Y-%m-%d}",
                    "detected_at": now.isoformat(timespec="seconds"),
                    "session": session,
                    "name": (q.get("longName") or "")[:60],
                    "price_at_detection": price,
                    "move_at_detection": move,
+                   "off_high": off_high,
+                   "repeat_runner": repeat,
                    "shares_out": shares,
                    "exchange": q.get("fullExchangeName", "")}
         found += 1
@@ -325,6 +336,12 @@ def render(state, now):
             flags.append("⚠️ ultra-low float")
         if fl.get("dilution_90d"):
             flags.append(f'<span class="neg">{fl["dilution_90d"]} dilution filing(s)</span>')
+        if d.get("repeat_runner"):
+            flags.append('<span class="neg">🔁 repeat pump</span>')
+        if d.get("off_high") is not None and d["off_high"] < 0.85:
+            flags.append('<span class="neg">📉 already fading off its high</span>')
+        if d["move_at_detection"] >= 0.5:
+            flags.append("🕑 caught late (already +50%)")
         badge = ""
         if sc.get("result") == "WIN":
             badge = '<span class="pill win">WIN</span>'
@@ -358,6 +375,42 @@ def render(state, now):
 <div class="stat"><b>{pct(sum(rule_vals) / n)}</b><span>avg per catch, with the rule</span></div>
 <div class="stat"><b>{pct(sum(closes) / n)}</b><span>avg if held to the close</span></div>
 </div>"""
+    # --- "what's working" splits: same catches, sliced by how we caught them ---
+    def split_row(label, group):
+        if len(group) < 3:
+            return ""
+        vals = [g["score"]["rule_pct"] for g in group]
+        w = sum(1 for v in vals if v > 0)
+        avg = sum(vals) / len(vals)
+        cls = "pos" if avg > 0 else "neg"
+        return (f'<tr><td>{label}</td><td class="num">{len(group)}</td>'
+                f'<td class="num">{100 * w / len(group):.0f}%</td>'
+                f'<td class="num {cls}">{pct(avg)}</td></tr>')
+
+    splits_html = ""
+    if scored:
+        fresh = [d for d in scored if d["move_at_detection"] < 0.5]
+        late = [d for d in scored if d["move_at_detection"] >= 0.5]
+        pre = [d for d in scored if d["session"] == "pre-market"]
+        reg = [d for d in scored if d["session"] == "regular"]
+        first = [d for d in scored if d.get("repeat_runner") is False]
+        rep = [d for d in scored if d.get("repeat_runner") is True]
+        srows = (split_row("Caught early (under +50% when spotted)", fresh)
+                 + split_row("Caught late (already +50% or more)", late)
+                 + split_row("Caught in pre-market", pre)
+                 + split_row("Caught during market hours", reg)
+                 + split_row("First-time runner", first)
+                 + split_row("🔁 Repeat pump (also ran in last 5 days)", rep))
+        if srows:
+            splits_html = f"""
+<h2>What's working — same catches, sliced up</h2>
+<p class="sub">Every group below uses the same +25%/−10% exit rule. This is how the scanner learns:
+find which KINDS of catches make money before trusting any of them.</p>
+<div class="scroll"><table>
+<thead><tr><th>Kind of catch</th><th class="num">Catches</th><th class="num">Win rate</th>
+<th class="num">Avg per catch</th></tr></thead>
+<tbody>{srows}</tbody></table></div>"""
+
     verdict = ("Too early to judge — building the track record."
                if n < 30 else "Track record live — see the table.")
 
@@ -411,6 +464,7 @@ scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <div class="verdict">{verdict}</div>
 {stats_html}
+{splits_html}
 <h2>Every catch, scored honestly</h2>
 <div class="scroll"><table>
 <thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
