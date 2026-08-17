@@ -48,6 +48,16 @@ TAKE_PROFIT, STOP_LOSS = 0.25, 0.10  # same honest exit rule we tested on Pro Ti
 SCORE_MAX_AGE_DAYS = 55              # Yahoo only keeps ~60 days of 5-min prices
 EDGAR_MAX_PER_RUN = 10
 
+# ---- the knobs for the "In Play" list (real companies, liquid, alive) ------
+# A different animal from the runner: not a pump lottery ticket, but a stock
+# that is genuinely "in play" today — enough real money trading that you could
+# get in AND out. William's "safish high-volume ticker of the day" idea.
+IP_PRICE_MIN, IP_PRICE_MAX = 5.0, 100.0   # real companies, not delisting bait
+IP_MIN_DOLLAR_VOL = 20_000_000            # $20M+ traded = liquid enough to exit
+IP_MIN_RVOL = 3.0                         # 3x its own normal volume = something's up
+IP_MOVE_MIN, IP_MOVE_MAX = 0.03, 0.15     # alive (3%+) but not a 50% pump
+IP_TP, IP_SL = 0.08, 0.05                 # gentler rule for the calmer band
+
 UA = {"User-Agent": "Mozilla/5.0 (Lighthouse research scanner)"}
 SEC_UA = {"User-Agent": "Lighthouse personal research scanner will@nanafy.ai"}
 DILUTION_FORMS = ("S-1", "S-3", "F-1", "F-3", "424B")
@@ -115,7 +125,8 @@ def yahoo_session():
 
 FIELDS = ("symbol,longName,regularMarketPrice,regularMarketChangePercent,"
           "regularMarketVolume,preMarketPrice,preMarketChangePercent,"
-          "regularMarketDayHigh,sharesOutstanding,marketCap,fullExchangeName")
+          "regularMarketDayHigh,sharesOutstanding,marketCap,fullExchangeName,"
+          "averageDailyVolume3Month,averageDailyVolume10Day")
 
 
 def batch_quotes(symbols):
@@ -210,9 +221,22 @@ def premarket_read(bars, shares_out=None):
     return out
 
 
-def score_detection(det):
+def vwap_at(bars, upto):
+    """Volume-weighted average price over regular-hours bars up to `upto`.
+    VWAP is the day's average price weighted by how much traded at each level —
+    the line big traders judge against. Price above it = buyers in control."""
+    num = den = 0.0
+    for t, h, lo, c, v in bars:
+        if dt.time(9, 30) <= t.time() < dt.time(16, 0) and t <= upto and v:
+            typical = (h + lo + c) / 3
+            num += typical * v
+            den += v
+    return (num / den) if den else None
+
+
+def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS):
     """The honest referee, same rules as the Pro Ticker tracker: buy at the
-    first traded price AFTER our detection, then +25% target / -10% stop /
+    first traded price AFTER our detection, then +tp target / -sl stop /
     else out at the close. Also record held-to-close and the best case."""
     out = {"status": "no data"}
     try:
@@ -229,16 +253,16 @@ def score_detection(det):
     seg = post[1:]
     rule, reason = None, "close"
     for _, h, lo, c, _v in seg:
-        tp = h >= entry * (1 + TAKE_PROFIT)
-        sl = lo <= entry * (1 - STOP_LOSS)
-        if tp and sl:
-            rule, reason = -STOP_LOSS, "stop"      # both in one bar -> assume the stop (honest)
+        hit_tp = h >= entry * (1 + tp)
+        hit_sl = lo <= entry * (1 - sl)
+        if hit_tp and hit_sl:
+            rule, reason = -sl, "stop"      # both in one bar -> assume the stop (honest)
             break
-        if tp:
-            rule, reason = TAKE_PROFIT, "target"
+        if hit_tp:
+            rule, reason = tp, "target"
             break
-        if sl:
-            rule, reason = -STOP_LOSS, "stop"
+        if hit_sl:
+            rule, reason = -sl, "stop"
             break
     close = seg[-1][3]
     at_close = (close - entry) / entry
@@ -250,6 +274,10 @@ def score_detection(det):
            "drawdown": (min(lo for _, _, lo, _, _ in seg) - entry) / entry,
            "rule_pct": rule, "rule_reason": reason,
            "result": "WIN" if rule > 0 else "LOSS"}
+    # VWAP read at the moment of detection: were buyers or sellers in control?
+    vw = vwap_at(bars, seen)
+    if vw:
+        out["above_vwap"] = entry >= vw
     out.update(premarket_read(bars, det.get("shares_out")))
     return out
 
@@ -329,14 +357,63 @@ def load_state():
         return json.loads(fetch(LIVE_DATA_URL).decode())
     except Exception:
         log("No previous data.json on the live site (first run?) — starting fresh.")
-        return {"detections": {}}
+        return {"detections": {}, "inplay": {}}
 
 
 # ---------------------------------------------------------------- detection
+def detect_inplay(state, now, quotes):
+    """The 'In Play' list: real, liquid companies genuinely moving today —
+    not pump lottery tickets. Filters on RVOL (relative volume = today's
+    volume vs the stock's own normal volume; the #1 day-trader metric) plus a
+    real-money liquidity floor. Regular hours only (RVOL needs the day going)."""
+    if now.time() < dt.time(9, 30) or now.time() >= dt.time(16, 0):
+        return
+    ip = state.setdefault("inplay", {})
+    found = 0
+    for sym, q in quotes.items():
+        price = q.get("regularMarketPrice")
+        move = (q.get("regularMarketChangePercent") or 0) / 100
+        vol = q.get("regularMarketVolume") or 0
+        avg = q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day") or 0
+        if not price or not (IP_PRICE_MIN <= price <= IP_PRICE_MAX):
+            continue
+        if not (IP_MOVE_MIN <= abs(move) <= IP_MOVE_MAX):
+            continue
+        if price * vol < IP_MIN_DOLLAR_VOL or not avg:
+            continue
+        # RVOL projected to a full day so an early-morning read isn't penalised
+        mins_open = max((now - now.replace(hour=9, minute=30, second=0,
+                                           microsecond=0)).total_seconds() / 60, 5)
+        projected = vol * (390 / min(mins_open, 390))
+        rvol = projected / avg
+        if rvol < IP_MIN_RVOL:
+            continue
+        k = f"{now:%Y-%m-%d}|{sym}"
+        if k in ip:
+            continue
+        ip[k] = {"ticker": sym, "date": f"{now:%Y-%m-%d}",
+                 "detected_at": now.isoformat(timespec="seconds"),
+                 "name": (q.get("longName") or "")[:60],
+                 "price_at_detection": price,
+                 "move_at_detection": move,
+                 "rvol": round(rvol, 1),
+                 "dollar_vol": round(price * vol),
+                 "direction": "up" if move > 0 else "down",
+                 "shares_out": q.get("sharesOutstanding"),
+                 "exchange": q.get("fullExchangeName", "")}
+        news = fetch_news(sym, count=1)
+        if news:
+            ip[k]["catalyst"] = news[0]
+        found += 1
+    if found:
+        log(f"In Play: {found} new liquid mover(s).")
+
+
 def detect(state, now):
     quotes = batch_quotes(stock_universe())
     log(f"Quoted {len(quotes)} stocks.")
     premarket = now.time() < dt.time(9, 30)
+    detect_inplay(state, now, quotes)
     dets = state["detections"]
     found = 0
     for sym, q in quotes.items():
@@ -408,25 +485,29 @@ def score_pending(state, now):
     """After the close (or for past days), score every unscored detection."""
     today = now.date()
     market_done = now.time() >= dt.time(16, 10)
-    n = 0
-    for det in state["detections"].values():
-        sc = det.get("score", {})
-        # re-score once if the score predates the pre-market X-ray fields
-        if sc.get("status") == "ok" and "pm_held" in sc:
-            continue
-        day = dt.date.fromisoformat(det["date"])
-        if (today - day).days > SCORE_MAX_AGE_DAYS:
-            continue
-        if day == today and not market_done:
-            continue
-        res = score_detection(det)
-        # never clobber a good existing score with a failed refetch
-        if res.get("status") == "ok" or sc.get("status") != "ok":
-            det["score"] = res
-        n += 1
-        time.sleep(0.7)
-    if n:
-        log(f"Scored {n} detection(s).")
+
+    def run(store, tp, sl, need_field):
+        n = 0
+        for det in store.values():
+            sc = det.get("score", {})
+            if sc.get("status") == "ok" and need_field in sc:
+                continue
+            day = dt.date.fromisoformat(det["date"])
+            if (today - day).days > SCORE_MAX_AGE_DAYS:
+                continue
+            if day == today and not market_done:
+                continue
+            res = score_detection(det, tp=tp, sl=sl)
+            if res.get("status") == "ok" or sc.get("status") != "ok":
+                det["score"] = res
+            n += 1
+            time.sleep(0.7)
+        return n
+
+    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "pm_held")
+    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "above_vwap")
+    if n1 or n2:
+        log(f"Scored {n1} runner(s), {n2} in-play mover(s).")
 
 
 # ---------------------------------------------------------------- rendering
@@ -598,6 +679,80 @@ find which KINDS of catches make money before trusting any of them.</p>
 
     body = "".join(rows) or ('<tr><td colspan="13" class="dimc">Nothing caught yet — '
                              'the scanner is watching.</td></tr>')
+
+    # ---- In Play tab: liquid real-company movers ----------------------------
+    ipall = sorted(state.get("inplay", {}).values(),
+                   key=lambda d: d["detected_at"], reverse=True)
+    ip_scored = [d for d in ipall if d.get("score", {}).get("status") == "ok"]
+    ip_rows = []
+    for d in ipall[:400]:
+        sc = d.get("score") or {}
+        cat = d.get("catalyst")
+        cat_html = "—"
+        if cat and cat.get("title"):
+            title = html.escape(cat["title"][:80])
+            link = html.escape(cat.get("link") or "")
+            cat_html = (f'<a href="{link}" target="_blank" rel="noopener">{title}</a>'
+                        if link else title)
+        vw = sc.get("above_vwap")
+        vwap_html = ("🟢 above" if vw else ("🔴 below" if vw is False else "—"))
+        rp = sc.get("rule_pct")
+        rcls = "pos" if (rp or 0) > 0 else ("neg" if rp is not None else "")
+        badge = ""
+        if sc.get("result") == "WIN":
+            badge = '<span class="pill win">WIN</span>'
+        elif sc.get("result") == "LOSS":
+            badge = '<span class="pill loss">LOSS</span>'
+        elif d["date"] == f"{now:%Y-%m-%d}":
+            badge = '<span class="pill live">live</span>'
+        t = dt.datetime.fromisoformat(d["detected_at"]).strftime("%-I:%M %p")
+        arrow = "▲" if d.get("direction") == "up" else "▼"
+        acls = "pos" if d.get("direction") == "up" else "neg"
+        ip_rows.append(f"""<tr><td>{d['date']}</td><td class="tk">{html.escape(d['ticker'])}</td>
+<td class="nm">{html.escape(d.get('name', ''))}</td><td>{t}</td>
+<td class="num">{d['price_at_detection']:g}</td>
+<td class="num {acls}">{arrow}{abs(d['move_at_detection']) * 100:.1f}%</td>
+<td class="num">{d.get('rvol', '—')}×</td>
+<td class="num">${d.get('dollar_vol', 0) / 1e6:.0f}M</td>
+<td>{vwap_html}</td><td class="ctx">{cat_html}</td>
+<td class="num {rcls}">{pct(rp)}</td><td class="num best">{pct(sc.get('best_case'))}</td>
+<td>{badge}</td></tr>""")
+    ip_body = "".join(ip_rows) or ('<tr><td colspan="13" class="dimc">No liquid movers '
+                                   'logged yet — the In-Play scan runs during market hours.</td></tr>')
+    ip_stats = ""
+    if ip_scored:
+        rv = [d["score"]["rule_pct"] for d in ip_scored]
+        w = sum(1 for x in rv if x > 0)
+        av = [d for d in ip_scored if d["score"].get("above_vwap")]
+        bv = [d for d in ip_scored if d["score"].get("above_vwap") is False]
+        def ipavg(g):
+            v = [x["score"]["rule_pct"] for x in g]
+            return (100 * sum(1 for x in v if x > 0) / len(v), 100 * sum(v) / len(v)) if v else (0, 0)
+        avw, ava = ipavg(av)
+        bvw, bva = ipavg(bv)
+        ip_stats = f"""<div class="stats">
+<div class="stat"><b>{len(ip_scored)}</b><span>movers scored</span></div>
+<div class="stat"><b>{100 * w / len(ip_scored):.0f}%</b><span>win rate (+{int(IP_TP*100)}%/−{int(IP_SL*100)}% rule)</span></div>
+<div class="stat"><b>{pct(sum(rv) / len(ip_scored))}</b><span>avg per mover</span></div>
+</div>"""
+        if av and bv:
+            ip_stats += (f'<p class="sub">Above VWAP when caught ({len(av)}): '
+                         f'<b>{avw:.0f}% win, {bva if False else ava:+.1f}% avg</b> · '
+                         f'below VWAP ({len(bv)}): <b>{bvw:.0f}% win, {bva:+.1f}% avg</b>. '
+                         'VWAP = the day\'s volume-weighted average price; above it means buyers '
+                         'were in control at the moment we caught it.</p>')
+    inplay_html = f"""{ip_stats}
+<h2>In Play today — liquid real-company movers</h2>
+<div class="scroll"><table>
+<thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
+<th class="num">Price</th><th class="num">Move</th><th class="num">RVOL</th>
+<th class="num">$ traded</th><th>VWAP</th><th>Catalyst</th>
+<th class="num">Rule (+{int(IP_TP*100)}/−{int(IP_SL*100)})</th><th class="num">Ran after</th><th></th></tr></thead>
+<tbody>{ip_body}</tbody></table></div>
+<p class="sub"><b>What this list is.</b> Real companies ($5–$100), $20M+ traded today, moving 3–15% on
+<b>3×+ their normal volume</b> ("RVOL"). Not pump lottery tickets — these are liquid enough to get in
+AND out. The idea: a calmer, safer daily "what's in play" list, scored with a gentler +{int(IP_TP*100)}%/−{int(IP_SL*100)}%
+rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p>"""
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="300">
@@ -655,7 +810,8 @@ ul.news a:hover {{ color:var(--accent); }}
 scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <nav class="tabs">
-<button class="tab active" data-t="catches">Catches</button>
+<button class="tab active" data-t="catches">Runners</button>
+<button class="tab" data-t="inplay">In Play</button>
 <button class="tab" data-t="working">What's working</button>
 <button class="tab" data-t="weather">Market weather</button>
 <button class="tab" data-t="news">News</button>
@@ -673,6 +829,7 @@ updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <th class="num">Ran after catch</th><th></th></tr></thead>
 <tbody>{body}</tbody></table></div>
 </section>
+<section id="tab-inplay" hidden>{inplay_html}</section>
 <section id="tab-working" hidden>{splits_html or '<p class="sub">Not enough scored catches yet.</p>'}</section>
 <section id="tab-weather" hidden>{weather_html}</section>
 <section id="tab-news" hidden>{news_html}</section>
