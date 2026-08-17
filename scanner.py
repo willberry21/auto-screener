@@ -167,7 +167,8 @@ def cik_map():
 
 # ----------------------------------------------------------------- scoring
 def day_bars(symbol, day_iso):
-    """5-minute prices for one day, pre-market and after-hours included."""
+    """5-minute prices for one day, pre-market and after-hours included.
+    Returns (timestamp, high, low, close, volume) bars."""
     d0 = dt.datetime.strptime(day_iso, "%Y-%m-%d").replace(tzinfo=ET)
     p1, p2 = int(d0.timestamp()), int((d0 + dt.timedelta(days=1)).timestamp())
     d = json.loads(fetch(
@@ -176,14 +177,37 @@ def day_bars(symbol, day_iso):
     res = d["chart"]["result"][0]
     q = res["indicators"]["quote"][0]
     bars = []
-    for t, h, lo, c in zip(res.get("timestamp") or [], q.get("high", []),
-                           q.get("low", []), q.get("close", [])):
+    for t, h, lo, c, v in zip(res.get("timestamp") or [], q.get("high", []),
+                              q.get("low", []), q.get("close", []),
+                              q.get("volume", [])):
         if None in (h, lo, c):
             continue
         ts = dt.datetime.fromtimestamp(t, ET)
         if ts.strftime("%Y-%m-%d") == day_iso:
-            bars.append((ts, float(h), float(lo), float(c)))
+            bars.append((ts, float(h), float(lo), float(c), float(v or 0)))
     return bars
+
+
+def premarket_read(bars, shares_out=None):
+    """William's insight (2026-08-17): pre-market isn't the enemy, it's the
+    X-ray. Two readings from it:
+      pm_held      — 9:30 open vs the pre-market high. Defended (>=0.90) days
+                     went on to new highs 28/31 times in our database;
+                     abandoned (<0.75) days only 10/44.
+      pm_turnover  — pre-market volume as a fraction of the whole float
+                     (our visible proxy for real liquidity/participation:
+                     a full-float churn is a crowd, a trickle is a ghost)."""
+    pm = [b for b in bars if b[0].time() < dt.time(9, 30)]
+    reg = [b for b in bars if dt.time(9, 30) <= b[0].time() < dt.time(16, 0)]
+    out = {"pm_held": None, "pm_turnover": None, "peak_premarket": None}
+    if pm and reg:
+        pm_high = max(b[1] for b in pm)
+        if pm_high > 0:
+            out["pm_held"] = round(reg[0][3] / pm_high, 3)
+        out["peak_premarket"] = pm_high >= max(b[1] for b in reg)
+        if shares_out:
+            out["pm_turnover"] = round(sum(b[4] for b in pm) / shares_out, 3)
+    return out
 
 
 def score_detection(det):
@@ -204,7 +228,7 @@ def score_detection(det):
     entry = post[0][3]
     seg = post[1:]
     rule, reason = None, "close"
-    for _, h, lo, c in seg:
+    for _, h, lo, c, _v in seg:
         tp = h >= entry * (1 + TAKE_PROFIT)
         sl = lo <= entry * (1 - STOP_LOSS)
         if tp and sl:
@@ -220,12 +244,14 @@ def score_detection(det):
     at_close = (close - entry) / entry
     if rule is None:
         rule = at_close
-    return {"status": "ok", "entry": round(entry, 4),
-            "at_close": at_close,
-            "best_case": (max(h for _, h, _, _ in seg) - entry) / entry,
-            "drawdown": (min(lo for _, _, lo, _ in seg) - entry) / entry,
-            "rule_pct": rule, "rule_reason": reason,
-            "result": "WIN" if rule > 0 else "LOSS"}
+    out = {"status": "ok", "entry": round(entry, 4),
+           "at_close": at_close,
+           "best_case": (max(h for _, h, _, _, _ in seg) - entry) / entry,
+           "drawdown": (min(lo for _, _, lo, _, _ in seg) - entry) / entry,
+           "rule_pct": rule, "rule_reason": reason,
+           "result": "WIN" if rule > 0 else "LOSS"}
+    out.update(premarket_read(bars, det.get("shares_out")))
+    return out
 
 
 # -------------------------------------------------------------------- state
@@ -285,6 +311,14 @@ def detect(state, now):
                    "shares_out": shares,
                    "exchange": q.get("fullExchangeName", "")}
         found += 1
+        # live pre-market X-ray for catches early in the regular session:
+        # did buyers defend the pre-market high at the open, or abandon it?
+        if session == "regular" and now.time() <= dt.time(11, 0):
+            try:
+                pr = premarket_read(day_bars(sym, f"{now:%Y-%m-%d}"), shares)
+                dets[k]["pm_read"] = pr
+            except Exception:
+                pass
         log(f"CAUGHT {sym} +{move * 100:.0f}% at {price:g} ({session}, "
             f"{shares / 1e6:.1f}M shares)")
     log(f"{found} new detection(s) this run.")
@@ -304,14 +338,19 @@ def score_pending(state, now):
     market_done = now.time() >= dt.time(16, 10)
     n = 0
     for det in state["detections"].values():
-        if det.get("score", {}).get("status") == "ok":
+        sc = det.get("score", {})
+        # re-score once if the score predates the pre-market X-ray fields
+        if sc.get("status") == "ok" and "pm_held" in sc:
             continue
         day = dt.date.fromisoformat(det["date"])
         if (today - day).days > SCORE_MAX_AGE_DAYS:
             continue
         if day == today and not market_done:
             continue
-        det["score"] = score_detection(det)
+        res = score_detection(det)
+        # never clobber a good existing score with a failed refetch
+        if res.get("status") == "ok" or sc.get("status") != "ok":
+            det["score"] = res
         n += 1
         time.sleep(0.7)
     if n:
@@ -338,6 +377,17 @@ def render(state, now):
             flags.append(f'<span class="neg">{fl["dilution_90d"]} dilution filing(s)</span>')
         if d.get("repeat_runner"):
             flags.append('<span class="neg">🔁 repeat pump</span>')
+        held = (sc.get("pm_held") if sc.get("pm_held") is not None
+                else (d.get("pm_read") or {}).get("pm_held"))
+        if held is not None:
+            if held >= 0.9:
+                flags.append('<span class="pos">🛡 defended pre-market high</span>')
+            elif held < 0.75:
+                flags.append('<span class="neg">🏳 abandoned pre-market high</span>')
+        turn = (sc.get("pm_turnover") if sc.get("pm_turnover") is not None
+                else (d.get("pm_read") or {}).get("pm_turnover"))
+        if turn is not None and turn >= 1.0:
+            flags.append(f"🌊 float traded {turn:.1f}× pre-market")
         if d.get("off_high") is not None and d["off_high"] < 0.85:
             flags.append('<span class="neg">📉 already fading off its high</span>')
         if d["move_at_detection"] >= 0.5:
@@ -395,7 +445,15 @@ def render(state, now):
         reg = [d for d in scored if d["session"] == "regular"]
         first = [d for d in scored if d.get("repeat_runner") is False]
         rep = [d for d in scored if d.get("repeat_runner") is True]
-        srows = (split_row("Caught early (under +50% when spotted)", fresh)
+        defended = [d for d in scored if (d["score"].get("pm_held") or 0) >= 0.9]
+        abandoned = [d for d in scored
+                     if d["score"].get("pm_held") is not None
+                     and d["score"]["pm_held"] < 0.75]
+        churned = [d for d in scored if (d["score"].get("pm_turnover") or 0) >= 1.0]
+        srows = (split_row("🛡 Defended its pre-market high at the open", defended)
+                 + split_row("🏳 Abandoned its pre-market high at the open", abandoned)
+                 + split_row("🌊 Float fully traded before the open", churned)
+                 + split_row("Caught early (under +50% when spotted)", fresh)
                  + split_row("Caught late (already +50% or more)", late)
                  + split_row("Caught in pre-market", pre)
                  + split_row("Caught during market hours", reg)
