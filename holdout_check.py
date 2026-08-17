@@ -13,15 +13,19 @@ TP, SL = 0.05, 0.15           # the rule we're validating
 LIVE = "https://willberry21.github.io/auto-screener/data.json"
 
 
-def replay(path, at_close, tp, sl):
+def replay(path, at_close, tp, sl, cost=0.0):
+    out = at_close
     for fav, adv in path:
         if fav >= tp and adv <= -sl:
-            return -sl                 # both in one bar -> assume the stop (honest)
+            out = -sl                  # both in one bar -> assume the stop (honest)
+            break
         if fav >= tp:
-            return tp
+            out = tp
+            break
         if adv <= -sl:
-            return -sl
-    return at_close
+            out = -sl
+            break
+    return out - cost                  # net of round-trip spread + slippage
 
 
 def stats(rows):
@@ -44,7 +48,8 @@ def main():
 
     in_sample, out_sample = [], []
     for c in scored:
-        r = replay(c["score"]["path"], c["score"]["at_close"], TP, SL)
+        r = replay(c["score"]["path"], c["score"]["at_close"], TP, SL,
+                   c["score"].get("cost", 0))
         (out_sample if c["date"] > CUTOFF else in_sample).append(r)
 
     print(f"=== +{int(TP*100)}%/-{int(SL*100)}% exit rule — holdout check ===")

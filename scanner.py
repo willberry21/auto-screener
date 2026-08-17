@@ -63,6 +63,14 @@ IP_TP, IP_SL = 0.08, 0.05                 # gentler rule for the calmer band
 SMALL_TP, SMALL_SL = 0.05, 0.05
 EARLY_RUNWAY = 0.05                        # >=5% left after we caught it = "early"
 
+# real-world friction. Commissions on stocks are ~$0 at modern brokers, but you
+# lose the bid-ask spread + slippage on BOTH entry and exit. Thin, cheap,
+# low-float runners have wide spreads; liquid $20M+ names much tighter. These
+# are round-trip estimates subtracted from every realized trade so the numbers
+# reflect what you'd actually keep — not a fantasy fill.
+COST_RUNNER = 0.010                        # ~0.5% each side on cheap low-float names
+COST_INPLAY = 0.003                        # ~0.15% each side on liquid names
+
 UA = {"User-Agent": "Mozilla/5.0 (Lighthouse research scanner)"}
 SEC_UA = {"User-Agent": "Lighthouse personal research scanner will@nanafy.ai"}
 DILUTION_FORMS = ("S-1", "S-3", "F-1", "F-3", "424B")
@@ -239,10 +247,13 @@ def vwap_at(bars, upto):
     return (num / den) if den else None
 
 
-def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS):
+def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS, cost=0.0):
     """The honest referee, same rules as the Pro Ticker tracker: buy at the
     first traded price AFTER our detection, then +tp target / -sl stop /
-    else out at the close. Also record held-to-close and the best case."""
+    else out at the close. Realized returns (the rule, the small target) are
+    reported NET of `cost` — the round-trip spread+slippage you actually pay.
+    best_case / drawdown / at_close stay raw (they describe the stock, not a
+    realized trade), and the exit tuner subtracts cost itself using `cost`."""
     out = {"status": "no data"}
     try:
         bars = day_bars(det["ticker"], det["date"])
@@ -291,13 +302,15 @@ def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS):
             break
     if small_pct is None:
         small_pct = at_close
-    out = {"status": "ok", "entry": round(entry, 4),
+    rule_net = rule - cost                   # what you actually keep after friction
+    small_net = small_pct - cost
+    out = {"status": "ok", "entry": round(entry, 4), "cost": cost,
            "at_close": at_close,
            "best_case": best_case,
            "drawdown": (min(lo for _, _, lo, _, _ in seg) - entry) / entry,
-           "rule_pct": rule, "rule_reason": reason,
-           "result": "WIN" if rule > 0 else "LOSS",
-           "small_pct": small_pct, "small_reason": small_reason,
+           "rule_pct": rule_net, "rule_reason": reason,
+           "result": "WIN" if rule_net > 0 else "LOSS",
+           "small_pct": small_net, "small_reason": small_reason,
            "early": best_case >= EARLY_RUNWAY,      # was there real upside left?
            # per-bar [favorable%, adverse%] from entry, so the exit-rule tuner
            # can replay ANY take-profit/stop-loss combo without re-fetching
@@ -515,7 +528,7 @@ def score_pending(state, now):
     today = now.date()
     market_done = now.time() >= dt.time(16, 10)
 
-    def run(store, tp, sl, need_field):
+    def run(store, tp, sl, cost, need_field):
         n = 0
         for det in store.values():
             sc = det.get("score", {})
@@ -526,15 +539,15 @@ def score_pending(state, now):
                 continue
             if day == today and not market_done:
                 continue
-            res = score_detection(det, tp=tp, sl=sl)
+            res = score_detection(det, tp=tp, sl=sl, cost=cost)
             if res.get("status") == "ok" or sc.get("status") != "ok":
                 det["score"] = res
             n += 1
             time.sleep(0.7)
         return n
 
-    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "path")
-    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "path")
+    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, COST_RUNNER, "cost")
+    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, COST_INPLAY, "cost")
     if n1 or n2:
         log(f"Scored {n1} runner(s), {n2} in-play mover(s).")
 
@@ -784,20 +797,24 @@ AND out. The idea: a calmer, safer daily "what's in play" list, scored with a ge
 rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p>"""
 
     # ---- exit-rule tuner: replay every take-profit/stop-loss combo ----------
-    def replay(path, at_close, tp, sl):
+    def replay(path, at_close, tp, sl, cost=0.0):
         """First touch wins: walk the bars; if +tp reached, +tp; if -sl reached,
         -sl; if a single bar hit both, assume the stop (honest). Never triggered
-        -> exit at the close."""
+        -> exit at the close. Result is NET of round-trip cost (spread+slippage)."""
+        out = at_close
         for fav, adv in path:
             hit_tp = fav >= tp
             hit_sl = adv <= -sl
             if hit_tp and hit_sl:
-                return -sl
+                out = -sl
+                break
             if hit_tp:
-                return tp
+                out = tp
+                break
             if hit_sl:
-                return -sl
-        return at_close
+                out = -sl
+                break
+        return out - cost
 
     tunable = [d for d in (list(state.get("detections", {}).values())
                            + list(state.get("inplay", {}).values()))
@@ -812,7 +829,7 @@ rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 's
             for tp in TP_GRID:
                 for sl in SL_GRID:
                     grid.setdefault((tp, sl), []).append(
-                        replay(sc["path"], sc["at_close"], tp, sl))
+                        replay(sc["path"], sc["at_close"], tp, sl, sc.get("cost", 0)))
         cells = {}
         best = None
         for (tp, sl), rets in grid.items():
@@ -852,7 +869,8 @@ rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 's
         frac = 0.20
         bal = 1000.0
         for d in sorted(tunable, key=lambda x: x["detected_at"]):
-            r = replay(d["score"]["path"], d["score"]["at_close"], bt, bs)
+            r = replay(d["score"]["path"], d["score"]["at_close"], bt, bs,
+                       d["score"].get("cost", 0))
             bal *= (1 + frac * r)
         tuner_html = f"""
 <p class="sub" style="font-size:15px">Every catch we've scored, replayed under <b>every</b>
@@ -873,6 +891,8 @@ one flattered by a couple of lottery tickets.</p>
 {len(tunable)} catches. As an illustration, $1,000 run through all {len(tunable)} catches in order using
 the ★ rule and risking 20% each time would be <b>${bal:,.0f}</b> — a rough feel, not a promise.</p>
 <div class="foot" style="margin-top:14px;border:0;padding-top:0">
+<b>These returns are net of costs</b> (~1% round trip on runners, ~0.3% on liquid names — spread +
+slippage; commissions ~$0). That's why a symmetric small rule struggles: costs eat thin edges.<br>
 <b>Read this with real skepticism.</b> Trying dozens of rules and picking the best is called
 <b>overfitting</b> — the winner is partly luck, and it will look worse on catches we haven't seen yet.
 That's exactly why the honest test is whether this rule keeps winning on FUTURE catches, which the
@@ -896,9 +916,10 @@ only, not advice.</div>"""
         bc = sc.get("best_case") or 0
         t = dt.datetime.fromisoformat(d["detected_at"]).strftime("%b %-d, %-I:%M %p")
         sm = sc.get("small_pct")
+        sr = sc.get("small_reason")
         smcls = "g" if (sm or 0) > 0 else "r"
-        smtxt = (f'+5% target hit' if sm and sm >= SMALL_TP - 1e-9
-                 else (f'stopped −5%' if sm and sm < 0 else f'{sm * 100:+.0f}% by close'))
+        smtxt = ("+5% target hit" if sr == "target"
+                 else ("−5% stop hit" if sr == "stop" else f"{(sm or 0) * 100:+.0f}% by close"))
         proof_cards.append(f"""<div class="mv up">
 <div class="mv-top"><span class="mv-tk">{html.escape(d['ticker'])}</span>
 <span class="mv-mv up">▲{bc * 100:.0f}%</span></div>
@@ -924,6 +945,9 @@ headline number is the share of <i>all</i> catches that were early.</p>
 <h2>🚀 Stocks we caught before they rocketed</h2>
 {proof_grid}
 <div class="foot" style="margin-top:16px;border:0;padding-top:0">
+<b>Costs are baked in.</b> The +5% target and rule returns are <b>net</b> of an estimated round-trip
+cost (~1% on thin runners, ~0.3% on liquid names — the spread + slippage you actually pay; commissions
+are ~$0 on modern brokers). "Room left" is raw — it describes the stock, not a trade you made.<br>
 <b>How to read this honestly.</b> "Room left" is the most the stock rose after our catch — a perfect
 exit nobody hits every time. The number that matters for your goal is the <b>+5% target hit rate</b>:
 a disciplined limit order at +5%, stop at −5%, first one to trigger wins. That's the closest thing to
