@@ -355,7 +355,7 @@ def render(state, now):
         rows.append(f"""<tr><td>{d['date']}</td><td class="tk">{html.escape(d['ticker'])}</td>
 <td class="nm">{html.escape(d.get('name', ''))}</td><td>{t} <span class="note">{d['session']}</span></td>
 <td class="num">{d['price_at_detection']:g}</td>
-<td class="num pos">+{d['move_at_detection'] * 100:.0f}%</td>
+<td class="num">+{d['move_at_detection'] * 100:.0f}%</td>
 <td class="num">{d['shares_out'] / 1e6:.1f}M</td>
 <td class="ctx">{' · '.join(flags) or '—'}</td>
 <td class="num {rule_cls}">{pct(rp)}<span class="note">{sc.get('rule_reason', '')}</span></td>
@@ -468,7 +468,7 @@ updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <h2>Every catch, scored honestly</h2>
 <div class="scroll"><table>
 <thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
-<th class="num">Price</th><th class="num">Move</th><th class="num">Shares</th>
+<th class="num">Price</th><th class="num">Already up (when caught)</th><th class="num">Shares</th>
 <th>Red flags</th><th class="num">Rule (+25/−10)</th><th class="num">At close</th>
 <th class="num">Best case</th><th></th></tr></thead>
 <tbody>{body}</tbody></table></div>
