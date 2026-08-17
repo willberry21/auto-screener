@@ -753,57 +753,166 @@ find which KINDS of catches make money before trusting any of them.</p>
 <b>3×+ their normal volume</b> ("RVOL"). Not pump lottery tickets — these are liquid enough to get in
 AND out. The idea: a calmer, safer daily "what's in play" list, scored with a gentler +{int(IP_TP*100)}%/−{int(IP_SL*100)}%
 rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p>"""
+
+    # ---- hero strip: the one-glance focus at the very top -------------------
+    today_iso = f"{now:%Y-%m-%d}"
+    todays_runners = [d for d in dets if d["date"] == today_iso]
+    todays_inplay = [d for d in ipall if d["date"] == today_iso]
+    spx = next((m.get("chg") for m in macro if m["symbol"] == "^GSPC"), None)
+    hero = f"""<div class="hero">
+<p class="hero-mood">{mood}</p>
+<div class="hero-row">
+<div class="hero-fig"><b>{len(todays_runners)}</b><span>runners caught today</span></div>
+<div class="hero-fig"><b>{len(todays_inplay)}</b><span>liquid movers in play</span></div>
+<div class="hero-fig"><b class="{'pos' if (spx or 0) > 0 else 'neg'}">{pct(spx)}</b><span>S&amp;P 500 today</span></div>
+<div class="hero-fig"><b>{n}</b><span>runners scored all-time</span></div>
+</div></div>"""
+
+    def mover_cards(items, kind):
+        """Big readable cards for today's catches — the eye lands here first."""
+        cards = []
+        for d in items[:12]:
+            up = d.get("move_at_detection", 0) >= 0 if kind == "inplay" else True
+            mv = d.get("move_at_detection", 0)
+            dircls = "up" if up else "down"
+            arrow = "▲" if up else "▼"
+            tags = []
+            if kind == "runner":
+                tags.append(f'<span class="tag">{d["shares_out"] / 1e6:.0f}M shares</span>')
+                if d["shares_out"] <= ULTRA_LOW:
+                    tags.append('<span class="tag r">ultra-low float</span>')
+                held = (d.get("pm_read") or {}).get("pm_held")
+                if held is not None and held >= 0.9:
+                    tags.append('<span class="tag g">🛡 defended</span>')
+                elif held is not None and held < 0.75:
+                    tags.append('<span class="tag r">🏳 abandoned</span>')
+            else:
+                tags.append(f'<span class="tag a">RVOL {d.get("rvol", "?")}×</span>')
+                tags.append(f'<span class="tag">${d.get("dollar_vol", 0) / 1e6:.0f}M</span>')
+            cat = d.get("catalyst") or {}
+            cat_html = ""
+            if cat.get("title"):
+                link = html.escape(cat.get("link") or "")
+                title = html.escape(cat["title"][:70])
+                cat_html = (f'<div class="mv-cat">📰 <a href="{link}" target="_blank" rel="noopener">{title}</a></div>'
+                            if link else f'<div class="mv-cat">📰 {title}</div>')
+            t = dt.datetime.fromisoformat(d["detected_at"]).strftime("%-I:%M %p")
+            cards.append(f"""<div class="mv {dircls}">
+<div class="mv-top"><span class="mv-tk">{html.escape(d['ticker'])}</span>
+<span class="mv-mv {dircls}">{arrow}{abs(mv) * 100:.0f}%</span></div>
+<div class="mv-nm">{html.escape(d.get('name', '') or '&nbsp;')} · {t}</div>
+<div class="mv-meta">{''.join(tags)}</div>{cat_html}</div>""")
+        return f'<div class="movers">{"".join(cards)}</div>' if cards else \
+            '<div class="empty">Nothing caught yet today — the scanner is watching. 👀</div>'
+
+    runner_cards = mover_cards(todays_runners, "runner")
+    inplay_cards = mover_cards(todays_inplay, "inplay")
+
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="300">
 <title>Runner Scanner — Project Lighthouse</title>
 <style>
 :root {{ color-scheme: light dark;
-  --bg:#0b0e14; --card:#151a24; --line:#232b3a; --txt:#e6edf3; --dim:#8b98a9;
-  --accent:#4da3ff; --good:#3fb950; --bad:#f85149; }}
-@media (prefers-color-scheme:light) {{ :root {{
-  --bg:#f4f6fa; --card:#fff; --line:#e2e8f0; --txt:#1a2230; --dim:#5b6675;
-  --accent:#1f6feb; --good:#1a7f37; --bad:#cf222e; }} }}
+  /* calm light palette (default) — soft, low-glare, one accent */
+  --bg:#f6f7fb; --card:#ffffff; --soft:#eef1f7; --line:#e4e8f0;
+  --txt:#1c2433; --dim:#69748a; --accent:#3a6df0; --accent-soft:#e8eefe;
+  --good:#1a8f4a; --good-soft:#e3f5ea; --bad:#d23b3b; --bad-soft:#fdeaea;
+  --shadow:0 1px 2px rgba(20,30,50,.04), 0 4px 16px rgba(20,30,50,.06); }}
+@media (prefers-color-scheme:dark) {{ :root {{
+  --bg:#0e1119; --card:#171b26; --soft:#1e2331; --line:#272d3d;
+  --txt:#e8edf6; --dim:#95a0b5; --accent:#6c9bff; --accent-soft:#1b2740;
+  --good:#48c07a; --good-soft:#152a1f; --bad:#f0685f; --bad-soft:#2c1a1a;
+  --shadow:0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.28); }} }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; background:var(--bg); color:var(--txt);
-  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-.wrap {{ max-width:1150px; margin:0 auto; padding:28px 20px 60px; }}
-h1 {{ font-size:26px; margin:0 0 4px; letter-spacing:-.02em; }}
-.sub {{ color:var(--dim); margin:0 0 20px; font-size:13.5px; }}
-.stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:18px 0; }}
-.stat {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
-.stat b {{ display:block; font-size:24px; letter-spacing:-.02em; }}
-.stat span {{ font-size:12px; color:var(--dim); }}
-.scroll {{ overflow-x:auto; }}
-table {{ width:100%; border-collapse:collapse; background:var(--card);
-  border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:13px; }}
-th,td {{ padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }}
-th {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }}
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  -webkit-font-smoothing:antialiased; }}
+.wrap {{ max-width:1120px; margin:0 auto; padding:26px 20px 80px; }}
+h1 {{ font-size:25px; margin:0 0 3px; letter-spacing:-.02em; display:flex; align-items:center; gap:9px; }}
+h2 {{ font-size:17px; margin:30px 0 14px; letter-spacing:-.01em; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+.sub {{ color:var(--dim); margin:0 0 18px; font-size:14px; max-width:760px; }}
+
+/* sticky, always-there navigation — one less thing to hunt for */
+.tabs {{ position:sticky; top:0; z-index:20; display:flex; gap:8px; flex-wrap:wrap;
+  margin:18px -20px 22px; padding:12px 20px; background:color-mix(in srgb,var(--bg) 86%,transparent);
+  backdrop-filter:saturate(1.4) blur(10px); border-bottom:1px solid var(--line); }}
+.tab {{ background:var(--card); color:var(--txt); border:1px solid var(--line); border-radius:999px;
+  padding:9px 18px; font-size:14px; font-weight:600; cursor:pointer; text-decoration:none;
+  display:inline-block; transition:all .12s; }}
+.tab:hover {{ border-color:var(--accent); color:var(--accent); }}
+.tab.active {{ background:var(--accent); color:#fff; border-color:var(--accent); box-shadow:var(--shadow); }}
+
+/* the one-glance focus strip at the very top */
+.hero {{ background:var(--card); border:1px solid var(--line); border-radius:18px;
+  padding:20px 22px; box-shadow:var(--shadow); margin-bottom:12px; }}
+.hero-mood {{ font-size:17px; font-weight:650; margin:0 0 12px; line-height:1.45; }}
+.hero-row {{ display:flex; gap:26px; flex-wrap:wrap; }}
+.hero-fig {{ display:flex; flex-direction:column; }}
+.hero-fig b {{ font-size:27px; letter-spacing:-.02em; line-height:1.1; }}
+.hero-fig span {{ font-size:12.5px; color:var(--dim); margin-top:2px; }}
+
+/* stat tiles */
+.stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:12px; margin:16px 0 6px; }}
+.stat {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:15px 17px; box-shadow:var(--shadow); }}
+.stat b {{ display:block; font-size:23px; letter-spacing:-.02em; }}
+.stat span {{ font-size:12.5px; color:var(--dim); display:block; margin-top:2px; }}
+.stat b.pos {{ color:var(--good); }} .stat b.neg {{ color:var(--bad); }}
+
+/* big readable mover cards — the Trade-Ideas idea, calmer */
+.movers {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(184px,1fr)); gap:12px; margin:4px 0 8px; }}
+.mv {{ background:var(--card); border:1px solid var(--line); border-left:5px solid var(--dim);
+  border-radius:14px; padding:14px 15px; box-shadow:var(--shadow); }}
+.mv.up {{ border-left-color:var(--good); }} .mv.down {{ border-left-color:var(--bad); }}
+.mv-top {{ display:flex; align-items:baseline; justify-content:space-between; gap:8px; }}
+.mv-tk {{ font-size:19px; font-weight:800; letter-spacing:-.01em; }}
+.mv-mv {{ font-size:16px; font-weight:700; }}
+.mv-mv.up {{ color:var(--good); }} .mv-mv.down {{ color:var(--bad); }}
+.mv-nm {{ font-size:12px; color:var(--dim); margin:3px 0 9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.mv-meta {{ display:flex; gap:6px; flex-wrap:wrap; }}
+.tag {{ font-size:11px; font-weight:600; padding:3px 9px; border-radius:999px;
+  background:var(--soft); color:var(--dim); }}
+.tag.g {{ background:var(--good-soft); color:var(--good); }}
+.tag.r {{ background:var(--bad-soft); color:var(--bad); }}
+.tag.a {{ background:var(--accent-soft); color:var(--accent); }}
+.mv-cat {{ font-size:11.5px; color:var(--dim); margin-top:9px; line-height:1.4; }}
+.mv-cat a {{ color:var(--dim); text-decoration:none; }} .mv-cat a:hover {{ color:var(--accent); }}
+
+/* details tables — lighter, roomier, zebra */
+details.more {{ margin:14px 0 4px; }}
+details.more > summary {{ cursor:pointer; font-size:13.5px; color:var(--accent); font-weight:600;
+  list-style:none; padding:8px 0; }}
+details.more > summary::-webkit-details-marker {{ display:none; }}
+details.more > summary:before {{ content:"▸ "; }}
+details.more[open] > summary:before {{ content:"▾ "; }}
+.scroll {{ overflow-x:auto; border-radius:14px; box-shadow:var(--shadow); }}
+table {{ width:100%; border-collapse:collapse; background:var(--card); font-size:13.5px; }}
+th,td {{ padding:11px 13px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }}
+th {{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim);
+  position:sticky; top:57px; background:var(--card); }}
+tbody tr:nth-child(even) {{ background:color-mix(in srgb,var(--soft) 55%,transparent); }}
+tbody tr:hover {{ background:var(--accent-soft); }}
 tr:last-child td {{ border-bottom:0; }}
 .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .tk {{ font-weight:700; }} .nm {{ color:var(--dim); max-width:180px; overflow:hidden; text-overflow:ellipsis; }}
-.pos {{ color:var(--good); }} .neg {{ color:var(--bad); }} .best {{ color:var(--good); }}
-.pill {{ padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:700; }}
-.pill.win {{ background:color-mix(in srgb,var(--good) 20%,transparent); color:var(--good); }}
-.pill.loss {{ background:color-mix(in srgb,var(--bad) 20%,transparent); color:var(--bad); }}
-.pill.live {{ background:color-mix(in srgb,var(--accent) 20%,transparent); color:var(--accent); }}
-.note {{ color:var(--dim); font-size:10.5px; margin-left:5px; }}
-.ctx {{ font-size:11.5px; color:var(--dim); white-space:normal; max-width:200px; }}
-.dimc {{ color:var(--dim); text-align:center; padding:18px; }}
-.verdict {{ display:inline-block; padding:6px 14px; border-radius:999px; font-weight:600;
-  font-size:13px; margin:4px 0 10px; background:color-mix(in srgb,var(--accent) 16%,transparent); color:var(--accent); }}
-.foot {{ margin-top:30px; color:var(--dim); font-size:12px; line-height:1.7; }}
-.foot b {{ color:var(--txt); }}
-.tabs {{ display:flex; gap:6px; flex-wrap:wrap; margin:0 0 20px; border-bottom:1px solid var(--line); padding-bottom:10px; }}
-.tab {{ background:var(--card); color:var(--txt); border:1px solid var(--line); border-radius:999px;
-  padding:7px 16px; font-size:13.5px; font-weight:600; cursor:pointer; text-decoration:none; display:inline-block; }}
-.tab.active {{ background:color-mix(in srgb,var(--accent) 18%,transparent); color:var(--accent); border-color:var(--accent); }}
-.tab:hover {{ border-color:var(--accent); }}
-ul.news {{ list-style:none; padding:0; margin:0 0 20px; display:flex; flex-direction:column; gap:8px; }}
-ul.news li {{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; font-size:13.5px; }}
+.pos {{ color:var(--good); font-weight:600; }} .neg {{ color:var(--bad); font-weight:600; }} .best {{ color:var(--good); }}
+.pill {{ padding:3px 10px; border-radius:999px; font-size:11px; font-weight:700; }}
+.pill.win {{ background:var(--good-soft); color:var(--good); }}
+.pill.loss {{ background:var(--bad-soft); color:var(--bad); }}
+.pill.live {{ background:var(--accent-soft); color:var(--accent); }}
+.note {{ color:var(--dim); font-size:11px; margin-left:5px; }}
+.ctx {{ font-size:12px; color:var(--dim); white-space:normal; max-width:210px; }}
+.dimc {{ color:var(--dim); text-align:center; padding:22px; }}
+.verdict {{ display:inline-block; padding:7px 15px; border-radius:999px; font-weight:600;
+  font-size:13.5px; margin:2px 0 4px; background:var(--accent-soft); color:var(--accent); }}
+.empty {{ background:var(--card); border:1px dashed var(--line); border-radius:14px;
+  padding:26px; text-align:center; color:var(--dim); }}
+ul.news {{ list-style:none; padding:0; margin:0 0 20px; display:flex; flex-direction:column; gap:9px; }}
+ul.news li {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 15px; box-shadow:var(--shadow); }}
 ul.news a {{ color:var(--txt); text-decoration:none; font-weight:600; }}
 ul.news a:hover {{ color:var(--accent); }}
-.stat b.pos {{ color:var(--good); }} .stat b.neg {{ color:var(--bad); }}
+.foot {{ margin-top:34px; padding-top:18px; border-top:1px solid var(--line); color:var(--dim); font-size:12.5px; line-height:1.75; }}
+.foot b {{ color:var(--txt); }}
 </style></head><body><div class="wrap">
 <h1>🔦 Runner Scanner</h1>
 <p class="sub">Catches low-float stocks the moment they move — no middleman, no late alerts ·
@@ -818,18 +927,35 @@ updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <a class="tab" href="patterns.html">Chart patterns ↗</a>
 </nav>
 <section id="tab-catches">
+{hero}
 <div class="verdict">{verdict}</div>
+<h2>🔥 Caught today</h2>
+{runner_cards}
 {stats_html}
-<h2>Every catch, scored honestly</h2>
+<details class="more"><summary>Show every catch, scored ({len(dets)} rows)</summary>
 <div class="scroll"><table>
 <thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
 <th class="num">Price</th><th class="num">Already up (when caught)</th><th class="num">Shares</th>
 <th>Catalyst (news at catch)</th>
 <th>Red flags</th><th class="num">Rule (+25/−10)</th><th class="num">At close</th>
 <th class="num">Ran after catch</th><th></th></tr></thead>
-<tbody>{body}</tbody></table></div>
+<tbody>{body}</tbody></table></div></details>
 </section>
-<section id="tab-inplay" hidden>{inplay_html}</section>
+<section id="tab-inplay" hidden>
+<h2>💧 In Play today <span class="note">real companies · liquid · calmer</span></h2>
+{inplay_cards}
+{ip_stats}
+<details class="more"><summary>Show every liquid mover, scored ({len(ipall)} rows)</summary>
+<div class="scroll"><table>
+<thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
+<th class="num">Price</th><th class="num">Move</th><th class="num">RVOL</th>
+<th class="num">$ traded</th><th>VWAP</th><th>Catalyst</th>
+<th class="num">Rule (+{int(IP_TP*100)}/−{int(IP_SL*100)})</th><th class="num">Ran after</th><th></th></tr></thead>
+<tbody>{ip_body}</tbody></table></div></details>
+<p class="sub"><b>What this list is.</b> Real companies ($5–$100), $20M+ traded today, moving 3–15% on
+<b>3×+ their normal volume</b> ("RVOL"). Not pump lottery tickets — liquid enough to get in AND out.
+A calmer daily "what's in play" list, scored with a gentler +{int(IP_TP*100)}%/−{int(IP_SL*100)}% rule.
+Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p></section>
 <section id="tab-working" hidden>{splits_html or '<p class="sub">Not enough scored catches yet.</p>'}</section>
 <section id="tab-weather" hidden>{weather_html}</section>
 <section id="tab-news" hidden>{news_html}</section>
