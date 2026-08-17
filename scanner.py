@@ -298,7 +298,11 @@ def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS):
            "rule_pct": rule, "rule_reason": reason,
            "result": "WIN" if rule > 0 else "LOSS",
            "small_pct": small_pct, "small_reason": small_reason,
-           "early": best_case >= EARLY_RUNWAY}     # was there real upside left?
+           "early": best_case >= EARLY_RUNWAY,      # was there real upside left?
+           # per-bar [favorable%, adverse%] from entry, so the exit-rule tuner
+           # can replay ANY take-profit/stop-loss combo without re-fetching
+           "path": [[round((h - entry) / entry, 4), round((lo - entry) / entry, 4)]
+                    for _, h, lo, _c, _v in seg]}
     # VWAP read at the moment of detection: were buyers or sellers in control?
     vw = vwap_at(bars, seen)
     if vw:
@@ -529,8 +533,8 @@ def score_pending(state, now):
             time.sleep(0.7)
         return n
 
-    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "small_pct")
-    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "small_pct")
+    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "path")
+    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "path")
     if n1 or n2:
         log(f"Scored {n1} runner(s), {n2} in-play mover(s).")
 
@@ -779,6 +783,102 @@ find which KINDS of catches make money before trusting any of them.</p>
 AND out. The idea: a calmer, safer daily "what's in play" list, scored with a gentler +{int(IP_TP*100)}%/−{int(IP_SL*100)}%
 rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p>"""
 
+    # ---- exit-rule tuner: replay every take-profit/stop-loss combo ----------
+    def replay(path, at_close, tp, sl):
+        """First touch wins: walk the bars; if +tp reached, +tp; if -sl reached,
+        -sl; if a single bar hit both, assume the stop (honest). Never triggered
+        -> exit at the close."""
+        for fav, adv in path:
+            hit_tp = fav >= tp
+            hit_sl = adv <= -sl
+            if hit_tp and hit_sl:
+                return -sl
+            if hit_tp:
+                return tp
+            if hit_sl:
+                return -sl
+        return at_close
+
+    tunable = [d for d in (list(state.get("detections", {}).values())
+                           + list(state.get("inplay", {}).values()))
+               if d.get("score", {}).get("status") == "ok" and d["score"].get("path")]
+    TP_GRID = [0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30]
+    SL_GRID = [0.03, 0.05, 0.08, 0.10, 0.12, 0.15]
+    tuner_html = '<p class="sub">Not enough scored catches with price paths yet.</p>'
+    if len(tunable) >= 10:
+        grid = {}          # (tp,sl) -> list of per-trade returns
+        for d in tunable:
+            sc = d["score"]
+            for tp in TP_GRID:
+                for sl in SL_GRID:
+                    grid.setdefault((tp, sl), []).append(
+                        replay(sc["path"], sc["at_close"], tp, sl))
+        cells = {}
+        best = None
+        for (tp, sl), rets in grid.items():
+            n2 = len(rets)
+            avg = sum(rets) / n2
+            wr = 100 * sum(1 for r in rets if r > 0) / n2
+            # outlier-robust: average with the top 3 winners removed
+            trimmed = sorted(rets)[:-3] if n2 > 6 else rets
+            avg_trim = sum(trimmed) / len(trimmed)
+            cells[(tp, sl)] = (avg, wr, avg_trim)
+            # rank by the trimmed average — the edge that ISN'T just a lottery win
+            if best is None or avg_trim > cells[best][2]:
+                best = (tp, sl)
+        # build the heatmap: rows = take-profit, cols = stop-loss
+        def cell_color(avg_trim):
+            # diverging: red (neg) -> neutral -> green (pos), scaled to +/-3%
+            v = max(-1, min(1, avg_trim / 0.03))
+            if v >= 0:
+                return f"color-mix(in srgb, var(--good) {int(v * 55)}%, transparent)"
+            return f"color-mix(in srgb, var(--bad) {int(-v * 55)}%, transparent)"
+        head = "".join(f'<th class="num">−{int(sl * 100)}%</th>' for sl in SL_GRID)
+        body_rows = []
+        for tp in TP_GRID:
+            tds = []
+            for sl in SL_GRID:
+                avg, wr, avg_trim = cells[(tp, sl)]
+                star = " ★" if (tp, sl) == best else ""
+                bd = "outline:2px solid var(--accent);" if (tp, sl) == best else ""
+                tds.append(f'<td class="num" title="win {wr:.0f}% · avg {avg*100:+.1f}%" '
+                           f'style="background:{cell_color(avg_trim)};{bd}">'
+                           f'{avg_trim * 100:+.1f}%{star}</td>')
+            body_rows.append(f'<tr><th class="num">+{int(tp * 100)}%</th>{"".join(tds)}</tr>')
+        bt, bs = best
+        bavg, bwr, btrim = cells[best]
+        # compounding illustration: $1000, this rule, one trade per trading day,
+        # risking a fixed 20% of the account each trade (illustration only)
+        frac = 0.20
+        bal = 1000.0
+        for d in sorted(tunable, key=lambda x: x["detected_at"]):
+            r = replay(d["score"]["path"], d["score"]["at_close"], bt, bs)
+            bal *= (1 + frac * r)
+        tuner_html = f"""
+<p class="sub" style="font-size:15px">Every catch we've scored, replayed under <b>every</b>
+combination of take-profit and stop-loss. The winning box (★) is chosen by the <b>outlier-robust</b>
+average — the top 3 lucky moonshots removed — so we reward a rule that works on ordinary catches, not
+one flattered by a couple of lottery tickets.</p>
+<div class="stats">
+<div class="stat"><b class="{'pos' if btrim > 0 else 'neg'}">+{int(bt*100)}% / −{int(bs*100)}%</b><span>best take-profit / stop-loss found</span></div>
+<div class="stat"><b>{bwr:.0f}%</b><span>win rate at that rule</span></div>
+<div class="stat"><b class="{'pos' if bavg > 0 else 'neg'}">{pct(bavg)}</b><span>avg per trade (all catches)</span></div>
+<div class="stat"><b class="{'pos' if btrim > 0 else 'neg'}">{pct(btrim)}</b><span>avg with top-3 winners removed</span></div>
+</div>
+<h2>Exit-rule grid <span class="note">outlier-robust avg return per trade · rows = take-profit, cols = stop-loss</span></h2>
+<div class="scroll"><table>
+<thead><tr><th class="num">TP ↓ / SL →</th>{head}</tr></thead>
+<tbody>{''.join(body_rows)}</tbody></table></div>
+<p class="sub">Greener = more profit per trade. The ★ box is the current best exit rule on
+{len(tunable)} catches. As an illustration, $1,000 run through all {len(tunable)} catches in order using
+the ★ rule and risking 20% each time would be <b>${bal:,.0f}</b> — a rough feel, not a promise.</p>
+<div class="foot" style="margin-top:14px;border:0;padding-top:0">
+<b>Read this with real skepticism.</b> Trying dozens of rules and picking the best is called
+<b>overfitting</b> — the winner is partly luck, and it will look worse on catches we haven't seen yet.
+That's exactly why the honest test is whether this rule keeps winning on FUTURE catches, which the
+scanner keeps logging automatically. The grid is a hypothesis generator, not a green light. Observation
+only, not advice.</div>"""
+
     # ---- "Caught before they rocketed" — the honest proof-of-concept -------
     all_scored = [d for d in scored] + [d for d in state.get("inplay", {}).values()
                                         if d.get("score", {}).get("status") == "ok"]
@@ -996,6 +1096,7 @@ scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <nav class="tabs">
 <button class="tab active" data-t="rocketed">🚀 Caught early</button>
+<button class="tab" data-t="tuner">🎯 Exit tuner</button>
 <button class="tab" data-t="catches">Runners</button>
 <button class="tab" data-t="inplay">In Play</button>
 <button class="tab" data-t="working">What's working</button>
@@ -1021,6 +1122,7 @@ updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <th class="num">Ran after catch</th><th></th></tr></thead>
 <tbody>{body}</tbody></table></div></details>
 </section>
+<section id="tab-tuner" hidden>{tuner_html}</section>
 <section id="tab-inplay" hidden>
 <h2>💧 In Play today <span class="note">real companies · liquid · calmer</span></h2>
 {inplay_cards}
