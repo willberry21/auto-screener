@@ -57,6 +57,11 @@ IP_MIN_DOLLAR_VOL = 20_000_000            # $20M+ traded = liquid enough to exit
 IP_MIN_RVOL = 3.0                         # 3x its own normal volume = something's up
 IP_MOVE_MIN, IP_MOVE_MAX = 0.03, 0.15     # alive (3%+) but not a 50% pump
 IP_TP, IP_SL = 0.08, 0.05                 # gentler rule for the calmer band
+# a small, realistic day-trade target — William's actual goal is 0.5-5%/day,
+# not moonshots. This measures: caught early enough that a +5% limit fills
+# before a -5% stop? First touch decides, same honest rule as everything else.
+SMALL_TP, SMALL_SL = 0.05, 0.05
+EARLY_RUNWAY = 0.05                        # >=5% left after we caught it = "early"
 
 UA = {"User-Agent": "Mozilla/5.0 (Lighthouse research scanner)"}
 SEC_UA = {"User-Agent": "Lighthouse personal research scanner will@nanafy.ai"}
@@ -268,12 +273,32 @@ def score_detection(det, tp=TAKE_PROFIT, sl=STOP_LOSS):
     at_close = (close - entry) / entry
     if rule is None:
         rule = at_close
+    best_case = (max(h for _, h, _, _, _ in seg) - entry) / entry
+    # small realistic target (William's 0.5-5%/day goal): first touch of
+    # +SMALL_TP vs -SMALL_SL after we caught it.
+    small_pct, small_reason = None, "close"
+    for _, h, lo, c, _v in seg:
+        hit_tp = h >= entry * (1 + SMALL_TP)
+        hit_sl = lo <= entry * (1 - SMALL_SL)
+        if hit_tp and hit_sl:
+            small_pct, small_reason = -SMALL_SL, "stop"
+            break
+        if hit_tp:
+            small_pct, small_reason = SMALL_TP, "target"
+            break
+        if hit_sl:
+            small_pct, small_reason = -SMALL_SL, "stop"
+            break
+    if small_pct is None:
+        small_pct = at_close
     out = {"status": "ok", "entry": round(entry, 4),
            "at_close": at_close,
-           "best_case": (max(h for _, h, _, _, _ in seg) - entry) / entry,
+           "best_case": best_case,
            "drawdown": (min(lo for _, _, lo, _, _ in seg) - entry) / entry,
            "rule_pct": rule, "rule_reason": reason,
-           "result": "WIN" if rule > 0 else "LOSS"}
+           "result": "WIN" if rule > 0 else "LOSS",
+           "small_pct": small_pct, "small_reason": small_reason,
+           "early": best_case >= EARLY_RUNWAY}     # was there real upside left?
     # VWAP read at the moment of detection: were buyers or sellers in control?
     vw = vwap_at(bars, seen)
     if vw:
@@ -504,8 +529,8 @@ def score_pending(state, now):
             time.sleep(0.7)
         return n
 
-    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "pm_held")
-    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "above_vwap")
+    n1 = run(state.get("detections", {}), TAKE_PROFIT, STOP_LOSS, "small_pct")
+    n2 = run(state.get("inplay", {}), IP_TP, IP_SL, "small_pct")
     if n1 or n2:
         log(f"Scored {n1} runner(s), {n2} in-play mover(s).")
 
@@ -754,6 +779,57 @@ find which KINDS of catches make money before trusting any of them.</p>
 AND out. The idea: a calmer, safer daily "what's in play" list, scored with a gentler +{int(IP_TP*100)}%/−{int(IP_SL*100)}%
 rule. Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still building the record — '}not advice.</p>"""
 
+    # ---- "Caught before they rocketed" — the honest proof-of-concept -------
+    all_scored = [d for d in scored] + [d for d in state.get("inplay", {}).values()
+                                        if d.get("score", {}).get("status") == "ok"]
+    early = [d for d in all_scored if d["score"].get("early")]
+    early.sort(key=lambda d: -(d["score"].get("best_case") or 0))
+    n_all = len(all_scored)
+    n_early = len(early)
+    small = [d["score"]["small_pct"] for d in all_scored
+             if d["score"].get("small_pct") is not None]
+    small_wins = sum(1 for v in small if v > 0)
+    early_rate = (100 * n_early / n_all) if n_all else 0
+    proof_cards = []
+    for d in early[:24]:
+        sc = d["score"]
+        bc = sc.get("best_case") or 0
+        t = dt.datetime.fromisoformat(d["detected_at"]).strftime("%b %-d, %-I:%M %p")
+        sm = sc.get("small_pct")
+        smcls = "g" if (sm or 0) > 0 else "r"
+        smtxt = (f'+5% target hit' if sm and sm >= SMALL_TP - 1e-9
+                 else (f'stopped −5%' if sm and sm < 0 else f'{sm * 100:+.0f}% by close'))
+        proof_cards.append(f"""<div class="mv up">
+<div class="mv-top"><span class="mv-tk">{html.escape(d['ticker'])}</span>
+<span class="mv-mv up">▲{bc * 100:.0f}%</span></div>
+<div class="mv-nm">room left after we caught it · {t}</div>
+<div class="mv-meta"><span class="tag {smcls}">{smtxt}</span>
+<span class="tag">caught at {d['price_at_detection']:g}</span></div></div>""")
+    proof_grid = (f'<div class="movers">{"".join(proof_cards)}</div>' if proof_cards
+                  else '<div class="empty">No early catches scored yet — the record is still building.</div>')
+    small_avg = (sum(small) / len(small)) if small else None
+    rocketed_html = f"""
+<p class="sub" style="font-size:15px">The honest test of whether this tool works: how often do we
+catch a stock while there's <b>still room left to run</b> — not after it already peaked? Every card below
+is a real catch where the stock kept climbing <b>after</b> our detection. No cherry-picking: the
+headline number is the share of <i>all</i> catches that were early.</p>
+<div class="stats">
+<div class="stat"><b class="{'pos' if early_rate >= 50 else ''}">{early_rate:.0f}%</b>
+<span>of catches had 5%+ room left AFTER we caught them ({n_early} of {n_all})</span></div>
+<div class="stat"><b>{100 * small_wins / len(small):.0f}%</b>
+<span>hit a +5% target before a −5% stop ({small_wins} of {len(small)})</span></div>
+<div class="stat"><b class="{'pos' if (small_avg or 0) > 0 else 'neg'}">{pct(small_avg)}</b>
+<span>avg per catch with a small +5%/−5% day-trade rule</span></div>
+</div>
+<h2>🚀 Stocks we caught before they rocketed</h2>
+{proof_grid}
+<div class="foot" style="margin-top:16px;border:0;padding-top:0">
+<b>How to read this honestly.</b> "Room left" is the most the stock rose after our catch — a perfect
+exit nobody hits every time. The number that matters for your goal is the <b>+5% target hit rate</b>:
+a disciplined limit order at +5%, stop at −5%, first one to trigger wins. That's the closest thing to
+the 0.5–5%/day you're aiming for. This is still observation only — not advice, and not yet a green light
+to trade. We're proving the edge first.</div>"""
+
     # ---- hero strip: the one-glance focus at the very top -------------------
     today_iso = f"{now:%Y-%m-%d}"
     todays_runners = [d for d in dets if d["date"] == today_iso]
@@ -919,15 +995,19 @@ ul.news a:hover {{ color:var(--accent); }}
 scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 <nav class="tabs">
-<button class="tab active" data-t="catches">Runners</button>
+<button class="tab active" data-t="rocketed">🚀 Caught early</button>
+<button class="tab" data-t="catches">Runners</button>
 <button class="tab" data-t="inplay">In Play</button>
 <button class="tab" data-t="working">What's working</button>
 <button class="tab" data-t="weather">Market weather</button>
 <button class="tab" data-t="news">News</button>
 <a class="tab" href="patterns.html">Chart patterns ↗</a>
 </nav>
-<section id="tab-catches">
+<section id="tab-rocketed">
 {hero}
+{rocketed_html}
+</section>
+<section id="tab-catches" hidden>
 <div class="verdict">{verdict}</div>
 <h2>🔥 Caught today</h2>
 {runner_cards}
