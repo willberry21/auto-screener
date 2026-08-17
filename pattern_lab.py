@@ -26,9 +26,11 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 HERE = Path(__file__).resolve().parent
-DB = HERE / "pattern_db.json"
-LIGHTHOUSE = HERE.parent.parent          # .../lighthouse
-CATALOG = LIGHTHOUSE / "LOOK AT THE DATA" / "5 — Chart pattern catalog.html"
+DB = HERE / "pattern_db.json"            # repo copy (bootstrap for the cloud)
+SITE = HERE / "site"
+LIGHTHOUSE = HERE.parent.parent          # .../lighthouse (exists on the Mac only)
+CATALOG_LOCAL = LIGHTHOUSE / "LOOK AT THE DATA" / "5 — Chart pattern catalog.html"
+LIVE_DB = "https://willberry21.github.io/auto-screener/pattern_db.json"
 SCANNER_DATA = "https://willberry21.github.io/auto-screener/data.json"
 PROTICKER_DATA = HERE.parent / "proticker-tracker" / "data.json"
 MAX_AGE_DAYS = 55                        # Yahoo's 5-minute history limit
@@ -303,33 +305,70 @@ rebuilt while the history is still available — the database (pattern_db.json) 
 <b>Observation only — not investment advice.</b>
 </div>
 </div></body></html>"""
-    CATALOG.write_text(doc)
-    log(f"Catalog written: {CATALOG.name} ({total} charts in {len(order)} groups)")
+    SITE.mkdir(exist_ok=True)
+    (SITE / "patterns.html").write_text(doc)
+    if CATALOG_LOCAL.parent.is_dir():                 # Mac convenience copy
+        CATALOG_LOCAL.write_text(doc)
+    log(f"Catalog written: site/patterns.html ({total} charts in {len(order)} groups)")
 
 
 def main():
-    catches = collect_catches()
+    import sys
+    force = "--force" in sys.argv
+    now = dt.datetime.now(ET)
     today = dt.date.today()
-    entries, skipped = [], 0
-    for k, (date, ticker, hhmm, rule, source) in sorted(catches.items()):
-        if (today - dt.date.fromisoformat(date)).days > MAX_AGE_DAYS:
-            skipped += 1
-            continue
-        try:
-            e = analyze(ticker, date, hhmm)
-        except Exception:
-            e = None
-        if e:
-            e["rule_pct"] = rule
-            e["source"] = source
-            entries.append(e)
-        else:
-            skipped += 1
-        time.sleep(0.35)
-    log(f"Analyzed {len(entries)} days ({skipped} skipped: too old or no data).")
-    DB.write_text(json.dumps({"built": dt.datetime.now(ET).isoformat(timespec='seconds'),
-                              "days": entries}, indent=1))
-    log(f"Database saved: {DB.name}")
+
+    # existing database: the live site's copy first, the repo copy as bootstrap
+    entries = []
+    try:
+        entries = fetch_json(LIVE_DB)["days"]
+        log(f"Loaded {len(entries)} days from the live database.")
+    except Exception:
+        if DB.exists():
+            entries = json.loads(DB.read_text())["days"]
+            log(f"Live db unavailable — loaded {len(entries)} days from the repo copy.")
+
+    catches = collect_catches()
+    # keep scores fresh on already-charted days (scoring can arrive later)
+    for e in entries:
+        c = catches.get(f"{e['date']}|{e['ticker']}")
+        if c and c[3] is not None:
+            e["rule_pct"] = c[3]
+
+    have = {(e["date"], e["ticker"]) for e in entries}
+    new = [(k, v) for k, v in sorted(catches.items())
+           if (v[0], v[1]) not in have
+           and (today - dt.date.fromisoformat(v[0])).days <= MAX_AGE_DAYS
+           and v[0] != f"{today:%Y-%m-%d}"]           # chart a day once it's over
+
+    # heavy fetching only in the evening (or --force): daytime runs just re-render
+    if new and (force or now.time() >= dt.time(16, 15) or now.isoweekday() > 5):
+        skipped = 0
+        for k, (date, ticker, hhmm, rule, source) in new:
+            try:
+                e = analyze(ticker, date, hhmm)
+            except Exception:
+                e = None
+            if e:
+                e["rule_pct"] = rule
+                e["source"] = source
+                entries.append(e)
+            else:
+                skipped += 1
+            time.sleep(0.35)
+        log(f"Charted {len(new) - skipped} new day(s) ({skipped} had no data).")
+    elif new:
+        log(f"{len(new)} day(s) waiting to be charted this evening.")
+
+    payload = json.dumps({"built": dt.datetime.now(ET).isoformat(timespec='seconds'),
+                          "days": entries}, indent=1)
+    SITE.mkdir(exist_ok=True)
+    (SITE / "pattern_db.json").write_text(payload)
+    try:
+        DB.write_text(payload)                        # repo copy (bootstrap)
+    except OSError:
+        pass
+    log(f"Database saved: {len(entries)} days.")
     render(entries)
     from collections import Counter
     for label, cnt in Counter(e["label"] for e in entries).most_common():

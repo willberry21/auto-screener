@@ -254,6 +254,74 @@ def score_detection(det):
     return out
 
 
+# ------------------------------------------------------- news & market weather
+def fetch_news(query, count=5):
+    """Yahoo's free news search — headlines with source, time, and link."""
+    try:
+        d = json.loads(fetch(
+            f"https://query1.finance.yahoo.com/v1/finance/search"
+            f"?q={query}&newsCount={count}&quotesCount=0"))
+        out = []
+        for n in d.get("news", [])[:count]:
+            out.append({"title": n.get("title", ""),
+                        "publisher": n.get("publisher", ""),
+                        "time": n.get("providerPublishTime", 0),
+                        "link": n.get("link", "")})
+        return out
+    except Exception:
+        return []
+
+
+MACRO_SYMBOLS = [
+    ("^GSPC", "S&P 500", "the 500 biggest US companies — the market's headline number"),
+    ("^IXIC", "Nasdaq", "tech-heavy index"),
+    ("^RUT", "Russell 2000 (small caps)", "small companies — the pond our runners swim in"),
+    ("^VIX", "VIX (fear gauge)", "how violent traders expect the next 30 days to be — up = fear"),
+    ("^TNX", "10-year Treasury yield", "the interest rate that prices everything else"),
+    ("BTC-USD", "Bitcoin", "risk-appetite thermometer — speculative money's mood"),
+]
+
+
+def macro_snapshot():
+    """One quote per macro dial, with day-change vs the prior close."""
+    out = []
+    for sym, label, why in MACRO_SYMBOLS:
+        try:
+            d = json.loads(fetch(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+                f"?range=1d&interval=5m"))
+            m = d["chart"]["result"][0]["meta"]
+            price = m.get("regularMarketPrice")
+            prev = m.get("chartPreviousClose") or m.get("previousClose")
+            chg = (price - prev) / prev if (price and prev) else None
+            out.append({"symbol": sym, "label": label, "why": why,
+                        "price": price, "chg": chg})
+        except Exception:
+            out.append({"symbol": sym, "label": label, "why": why,
+                        "price": None, "chg": None})
+        time.sleep(0.2)
+    return out
+
+
+def macro_readout(macro):
+    """A one-line plain-English read of the day's weather."""
+    by = {m["symbol"]: m.get("chg") for m in macro}
+    spx, rut, vix = by.get("^GSPC"), by.get("^RUT"), by.get("^VIX")
+    if spx is None:
+        return "Market weather unavailable right now."
+    if spx > 0.003 and (vix is None or vix < 0):
+        mood = "Risk-ON: the big market is up and fear is falling — speculative money flows easier."
+    elif spx < -0.003 and (vix is None or vix > 0):
+        mood = "Risk-OFF: the big market is down and fear is rising — runners get abandoned faster."
+    else:
+        mood = "Mixed / quiet: no strong push from the big market either way."
+    if rut is not None and spx is not None and rut - spx > 0.005:
+        mood += " Small caps are leading — good sign for our pond."
+    elif rut is not None and spx is not None and spx - rut > 0.005:
+        mood += " Small caps are lagging the big market — our pond is out of favor."
+    return mood
+
+
 # -------------------------------------------------------------------- state
 def load_state():
     """Yesterday's memory lives on the published page itself."""
@@ -311,6 +379,10 @@ def detect(state, now):
                    "shares_out": shares,
                    "exchange": q.get("fullExchangeName", "")}
         found += 1
+        # the catalyst: what news (if any) is this stock moving on right now?
+        news = fetch_news(sym, count=1)
+        if news:
+            dets[k]["catalyst"] = news[0]
         # live pre-market X-ray for catches early in the regular session:
         # did buyers defend the pre-market high at the open, or abandon it?
         if session == "regular" and now.time() <= dt.time(11, 0):
@@ -402,11 +474,19 @@ def render(state, now):
         t = dt.datetime.fromisoformat(d["detected_at"]).strftime("%-I:%M %p")
         rp = sc.get("rule_pct")
         rule_cls = "pos" if (rp or 0) > 0 else ("neg" if rp is not None else "")
+        cat = d.get("catalyst")
+        cat_html = "—"
+        if cat and cat.get("title"):
+            title = html.escape(cat["title"][:80])
+            link = html.escape(cat.get("link") or "")
+            cat_html = (f'<a href="{link}" target="_blank" rel="noopener">{title}</a>'
+                        if link else title)
         rows.append(f"""<tr><td>{d['date']}</td><td class="tk">{html.escape(d['ticker'])}</td>
 <td class="nm">{html.escape(d.get('name', ''))}</td><td>{t} <span class="note">{d['session']}</span></td>
 <td class="num">{d['price_at_detection']:g}</td>
 <td class="num">+{d['move_at_detection'] * 100:.0f}%</td>
 <td class="num">{d['shares_out'] / 1e6:.1f}M</td>
+<td class="ctx">{cat_html}</td>
 <td class="ctx">{' · '.join(flags) or '—'}</td>
 <td class="num {rule_cls}">{pct(rp)}<span class="note">{sc.get('rule_reason', '')}</span></td>
 <td class="num">{pct(sc.get('at_close'))}</td>
@@ -472,7 +552,51 @@ find which KINDS of catches make money before trusting any of them.</p>
     verdict = ("Too early to judge — building the track record."
                if n < 30 else "Track record live — see the table.")
 
-    body = "".join(rows) or ('<tr><td colspan="12" class="dimc">Nothing caught yet — '
+    # ---- market weather + news tabs ----------------------------------------
+    macro = macro_snapshot()
+    mood = macro_readout(macro)
+    mcards = []
+    for m in macro:
+        chg = m.get("chg")
+        cls = "pos" if (chg or 0) > 0 else ("neg" if chg is not None else "")
+        val = f"{m['price']:,.2f}" if m.get("price") else "—"
+        mcards.append(f"""<div class="stat"><b class="{cls}">{pct(chg)}</b>
+<span><b style="font-size:13px">{m['label']}</b> · {val}</span>
+<span>{m['why']}</span></div>""")
+    weather_html = (f'<p class="sub" style="font-size:15px"><b>{mood}</b></p>'
+                    f'<div class="stats">{"".join(mcards)}</div>'
+                    '<p class="sub">Why this tab exists: micro-cap runners live inside the big market\'s '
+                    'mood. On risk-off days (market down, fear up) even good catches get abandoned '
+                    'faster. Same data source as everything else — free, checked every run.</p>')
+
+    def news_list(items):
+        lis = []
+        for nw in items:
+            ts = dt.datetime.fromtimestamp(nw["time"], ET).strftime("%b %-d, %-I:%M %p ET") if nw.get("time") else ""
+            title = html.escape(nw.get("title", "")[:120])
+            link = html.escape(nw.get("link") or "")
+            pub = html.escape(nw.get("publisher", ""))
+            body_txt = f'<a href="{link}" target="_blank" rel="noopener">{title}</a>' if link else title
+            lis.append(f'<li>{body_txt} <span class="note">{pub} · {ts}</span></li>')
+        return "<ul class=\"news\">" + "".join(lis) + "</ul>" if lis else '<p class="sub">No headlines fetched this run.</p>'
+
+    market_news = fetch_news("stock market", 8)
+    todays = [d for d in dets if d["date"] == f"{now:%Y-%m-%d}"][:8]
+    ticker_news = []
+    for d in todays:
+        for nw in fetch_news(d["ticker"], 2):
+            nw["title"] = f"[{d['ticker']}] " + nw.get("title", "")
+            ticker_news.append(nw)
+        time.sleep(0.2)
+    ticker_news.sort(key=lambda x: -(x.get("time") or 0))
+    news_html = ("<h2>Today's caught tickers — their headlines</h2>"
+                 + news_list(ticker_news[:16])
+                 + "<h2>The big market</h2>" + news_list(market_news)
+                 + '<p class="sub">Headlines are pulled automatically and are NOT vetted — a press '
+                 'release on a micro-cap is often part of the pump itself. A catch with NO news at '
+                 'all is its own red flag: something is moving it, and it isn\'t public information.</p>')
+
+    body = "".join(rows) or ('<tr><td colspan="13" class="dimc">Nothing caught yet — '
                              'the scanner is watching.</td></tr>')
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -515,21 +639,51 @@ tr:last-child td {{ border-bottom:0; }}
   font-size:13px; margin:4px 0 10px; background:color-mix(in srgb,var(--accent) 16%,transparent); color:var(--accent); }}
 .foot {{ margin-top:30px; color:var(--dim); font-size:12px; line-height:1.7; }}
 .foot b {{ color:var(--txt); }}
+.tabs {{ display:flex; gap:6px; flex-wrap:wrap; margin:0 0 20px; border-bottom:1px solid var(--line); padding-bottom:10px; }}
+.tab {{ background:var(--card); color:var(--txt); border:1px solid var(--line); border-radius:999px;
+  padding:7px 16px; font-size:13.5px; font-weight:600; cursor:pointer; text-decoration:none; display:inline-block; }}
+.tab.active {{ background:color-mix(in srgb,var(--accent) 18%,transparent); color:var(--accent); border-color:var(--accent); }}
+.tab:hover {{ border-color:var(--accent); }}
+ul.news {{ list-style:none; padding:0; margin:0 0 20px; display:flex; flex-direction:column; gap:8px; }}
+ul.news li {{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; font-size:13.5px; }}
+ul.news a {{ color:var(--txt); text-decoration:none; font-weight:600; }}
+ul.news a:hover {{ color:var(--accent); }}
+.stat b.pos {{ color:var(--good); }} .stat b.neg {{ color:var(--bad); }}
 </style></head><body><div class="wrap">
 <h1>🔦 Runner Scanner</h1>
 <p class="sub">Catches low-float stocks the moment they move — no middleman, no late alerts ·
 scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
+<nav class="tabs">
+<button class="tab active" data-t="catches">Catches</button>
+<button class="tab" data-t="working">What's working</button>
+<button class="tab" data-t="weather">Market weather</button>
+<button class="tab" data-t="news">News</button>
+<a class="tab" href="patterns.html">Chart patterns ↗</a>
+</nav>
+<section id="tab-catches">
 <div class="verdict">{verdict}</div>
 {stats_html}
-{splits_html}
 <h2>Every catch, scored honestly</h2>
 <div class="scroll"><table>
 <thead><tr><th>Date</th><th>Ticker</th><th>Company</th><th>Caught at</th>
 <th class="num">Price</th><th class="num">Already up (when caught)</th><th class="num">Shares</th>
+<th>Catalyst (news at catch)</th>
 <th>Red flags</th><th class="num">Rule (+25/−10)</th><th class="num">At close</th>
-<th class="num">Best case</th><th></th></tr></thead>
+<th class="num">Ran after catch</th><th></th></tr></thead>
 <tbody>{body}</tbody></table></div>
+</section>
+<section id="tab-working" hidden>{splits_html or '<p class="sub">Not enough scored catches yet.</p>'}</section>
+<section id="tab-weather" hidden>{weather_html}</section>
+<section id="tab-news" hidden>{news_html}</section>
+<script>
+document.querySelectorAll('button.tab').forEach(b => b.addEventListener('click', () => {{
+  document.querySelectorAll('button.tab').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelectorAll('section[id^=tab-]').forEach(s => s.hidden = true);
+  document.getElementById('tab-' + b.dataset.t).hidden = false;
+}}));
+</script>
 <div class="foot">
 <b>What this is.</b> Project Lighthouse's own detector. It watches every stock on NASDAQ and NYSE
 and logs the moment a cheap, low-float stock (60&nbsp;million shares or fewer — so little supply that
