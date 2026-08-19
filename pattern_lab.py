@@ -250,6 +250,8 @@ def render(entries):
     now = dt.datetime.now(ET).strftime("%B %-d, %Y at %-I:%M %p ET")
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
 <title>Chart Pattern Catalog — Project Lighthouse</title>
 <style>
 :root {{ color-scheme: light dark;
@@ -261,10 +263,15 @@ def render(entries):
   --accent:#1f6feb; --good:#1a7f37; --bad:#cf222e; --ink:#1a2230;
   --pmband:rgba(91,102,117,.10); }} }}
 * {{ box-sizing:border-box; }}
+html {{ -webkit-tap-highlight-color:transparent; }}
+a {{ touch-action:manipulation; }}
+.skip {{ position:absolute; left:-9999px; background:var(--accent); color:#fff;
+  padding:10px 16px; border-radius:0 0 10px 0; z-index:50; font-weight:600; }}
+.skip:focus {{ left:0; top:0; }}
 body {{ margin:0; background:var(--bg); color:var(--txt);
   font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
 .wrap {{ max-width:1200px; margin:0 auto; padding:30px 20px 70px; }}
-h1 {{ font-size:26px; margin:0 0 4px; letter-spacing:-.02em; }}
+h1 {{ font-size:26px; margin:0 0 4px; letter-spacing:-.02em; text-wrap:balance; }}
 .sub {{ color:var(--dim); font-size:13.5px; margin:0 0 6px; max-width:820px; }}
 h2 {{ font-size:17px; margin:34px 0 12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
 .count {{ color:var(--dim); font-weight:400; font-size:13px; }}
@@ -273,21 +280,23 @@ h2 {{ font-size:17px; margin:34px 0 12px; display:flex; align-items:center; gap:
 .chip.good {{ background:color-mix(in srgb,var(--good) 16%,transparent); color:var(--good); }}
 .chip.bad {{ background:color-mix(in srgb,var(--bad) 16%,transparent); color:var(--bad); }}
 .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(236px,1fr)); gap:10px; }}
-.card {{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 10px 8px; }}
+.card {{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 10px 8px;
+  content-visibility:auto; contain-intrinsic-size:auto 150px; }}
 .chead {{ display:flex; align-items:center; gap:8px; font-size:13px; margin-bottom:4px; }}
 .dt {{ color:var(--dim); font-size:11.5px; }}
-.pill {{ margin-left:auto; padding:1px 8px; border-radius:999px; font-size:10.5px; font-weight:700; }}
+.pill {{ margin-left:auto; padding:1px 8px; border-radius:999px; font-size:10.5px; font-weight:700;
+  font-variant-numeric:tabular-nums; }}
 .pill.win {{ background:color-mix(in srgb,var(--good) 20%,transparent); color:var(--good); }}
 .pill.loss {{ background:color-mix(in srgb,var(--bad) 20%,transparent); color:var(--bad); }}
 .sp {{ width:100%; height:64px; display:block; }}
-.cfoot {{ color:var(--dim); font-size:11px; margin-top:3px; }}
+.cfoot {{ color:var(--dim); font-size:11px; margin-top:3px; font-variant-numeric:tabular-nums; }}
 .legend {{ color:var(--dim); font-size:12.5px; margin:10px 0 0; }}
 .legend b {{ color:var(--txt); }}
 .foot {{ margin-top:40px; color:var(--dim); font-size:12px; line-height:1.7; max-width:860px; }}
 .back {{ display:inline-block; color:var(--dim); text-decoration:none; font-size:13px;
   font-weight:600; margin-bottom:10px; }}
 .back:hover {{ color:var(--accent); }}
-</style></head><body><div class="wrap">
+</style></head><body><a class="skip" href="#main">Skip to content</a><div class="wrap">
 <a class="back" href="index.html">&larr; Back to the scanner</a>
 <h1>📈 Chart Pattern Catalog</h1>
 <p class="sub">Every runner Lighthouse has ever caught, drawn as its actual day — one mini-chart per
@@ -299,7 +308,7 @@ shapes are honestly comparable. Grouped by the shape of the move. Rebuilt {now} 
 The blue dashed line is the moment we caught it — dashed line LEFT of the dot means we were early;
 RIGHT of the dot means we arrived after the party. "Kept" = how much of the peak gain survived to
 the close. The +/-% pill is the honest rule result (+25% target / −10% stop from our catch).</p>
-{''.join(sections)}
+<main id="main">{''.join(sections)}</main>
 <div class="foot">
 <b>What "runway" means.</b> The minutes between the move first crossing +20% (the scanner's tripwire)
 and the top of the day. That's the maximum time ANY scanner has to catch the move while there's still

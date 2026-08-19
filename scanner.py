@@ -664,7 +664,7 @@ def render(state, now):
                  + split_row("🔁 Repeat pump (also ran in last 5 days)", rep))
         if srows:
             splits_html = f"""
-<h2>What's working — same catches, sliced up</h2>
+<h2>What&rsquo;s working — same catches, sliced up</h2>
 <p class="sub">Every group below uses the same +25%/−10% exit rule. This is how the scanner learns:
 find which KINDS of catches make money before trusting any of them.</p>
 <div class="scroll"><table>
@@ -931,7 +931,7 @@ only, not advice.</div>"""
     small_avg = (sum(small) / len(small)) if small else None
     rocketed_html = f"""
 <p class="sub" style="font-size:15px">The honest test of whether this tool works: how often do we
-catch a stock while there's <b>still room left to run</b> — not after it already peaked? Every card below
+catch a stock while there&rsquo;s <b>still room left to run</b> — not after it already peaked? Every card below
 is a real catch where the stock kept climbing <b>after</b> our detection. No cherry-picking: the
 headline number is the share of <i>all</i> catches that were early.</p>
 <div class="stats">
@@ -942,7 +942,7 @@ headline number is the share of <i>all</i> catches that were early.</p>
 <div class="stat"><b class="{'pos' if (small_avg or 0) > 0 else 'neg'}">{pct(small_avg)}</b>
 <span>avg per catch with a small +5%/−5% day-trade rule</span></div>
 </div>
-<h2>🚀 Stocks we caught before they rocketed</h2>
+<h2><span aria-hidden="true">🚀</span> Stocks we caught before they rocketed</h2>
 {proof_grid}
 <div class="foot" style="margin-top:16px;border:0;padding-top:0">
 <b>Costs are baked in.</b> The +5% target and rule returns are <b>net</b> of an estimated round-trip
@@ -1010,6 +1010,8 @@ to trade. We're proving the edge first.</div>"""
 
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1119" media="(prefers-color-scheme: dark)">
 <title>Runner Scanner — Project Lighthouse</title>
 <style>
 :root {{ color-scheme: light dark;
@@ -1024,9 +1026,17 @@ to trade. We're proving the edge first.</div>"""
   --good:#48c07a; --good-soft:#152a1f; --bad:#f0685f; --bad-soft:#2c1a1a;
   --shadow:0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.28); }} }}
 * {{ box-sizing:border-box; }}
+html {{ -webkit-tap-highlight-color:transparent; }}
 body {{ margin:0; background:var(--bg); color:var(--txt);
   font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
   -webkit-font-smoothing:antialiased; }}
+button, a, summary {{ touch-action:manipulation; }}
+@media (prefers-reduced-motion: reduce) {{
+  *, *::before, *::after {{ transition-duration:.01ms !important; animation-duration:.01ms !important; }} }}
+/* visible only when tabbed to — lets a keyboard skip the tab strip */
+.skip {{ position:absolute; left:-9999px; background:var(--accent); color:#fff;
+  padding:10px 16px; border-radius:0 0 10px 0; z-index:50; font-weight:600; }}
+.skip:focus {{ left:0; top:0; }}
 .wrap {{ max-width:1120px; margin:0 auto; padding:26px 20px 80px; }}
 h1 {{ font-size:25px; margin:0 0 3px; letter-spacing:-.02em; display:flex; align-items:center; gap:9px; }}
 h2 {{ font-size:17px; margin:30px 0 14px; letter-spacing:-.01em; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
@@ -1039,14 +1049,14 @@ h2 {{ font-size:17px; margin:30px 0 14px; letter-spacing:-.01em; display:flex; a
 .tablist {{ display:contents; }}
 .tab {{ background:var(--card); color:var(--txt); border:1px solid var(--line); border-radius:999px;
   padding:9px 18px; font-size:14px; font-weight:600; cursor:pointer; text-decoration:none;
-  display:inline-block; transition:all .12s; }}
+  display:inline-block; transition:border-color .12s, color .12s, background-color .12s; }}
 .tab:hover {{ border-color:var(--accent); color:var(--accent); }}
 .tab.active {{ background:var(--accent); color:#fff; border-color:var(--accent); box-shadow:var(--shadow); }}
 
 /* the one-glance focus strip at the very top */
 .hero {{ background:var(--card); border:1px solid var(--line); border-radius:18px;
   padding:20px 22px; box-shadow:var(--shadow); margin-bottom:12px; }}
-.hero-mood {{ font-size:17px; font-weight:650; margin:0 0 12px; line-height:1.45; }}
+.hero-mood {{ font-size:17px; font-weight:650; margin:0 0 12px; line-height:1.45; text-wrap:balance; }}
 .hero-row {{ display:flex; gap:26px; flex-wrap:wrap; }}
 .hero-fig {{ display:flex; flex-direction:column; }}
 .hero-fig b {{ font-size:27px; letter-spacing:-.02em; line-height:1.1; }}
@@ -1090,6 +1100,7 @@ table {{ width:100%; border-collapse:collapse; background:var(--card); font-size
 th,td {{ padding:11px 13px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }}
 th {{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim);
   position:sticky; top:57px; background:var(--card); }}
+@media (max-width:760px) {{ th {{ position:static; }} }}
 tbody tr:nth-child(even) {{ background:color-mix(in srgb,var(--soft) 55%,transparent); }}
 tbody tr:hover {{ background:var(--accent-soft); }}
 tr:last-child td {{ border-bottom:0; }}
@@ -1113,8 +1124,8 @@ ul.news a {{ color:var(--txt); text-decoration:none; font-weight:600; }}
 ul.news a:hover {{ color:var(--accent); }}
 .foot {{ margin-top:34px; padding-top:18px; border-top:1px solid var(--line); color:var(--dim); font-size:12.5px; line-height:1.75; }}
 .foot b {{ color:var(--txt); }}
-</style></head><body><div class="wrap">
-<h1>🔦 Runner Scanner</h1>
+</style></head><body><a class="skip" href="#main">Skip to content</a><div class="wrap">
+<h1><span aria-hidden="true">🔦</span> Runner Scanner</h1>
 <p class="sub">Catches low-float stocks the moment they move — no middleman, no late alerts ·
 scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
@@ -1130,7 +1141,7 @@ updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
 </div>
 <a class="tab" href="patterns.html">Chart patterns ↗</a>
 </nav>
-<section id="tab-rocketed">
+<main id="main"><section id="tab-rocketed">
 {hero}
 {rocketed_html}
 </section>
@@ -1167,6 +1178,7 @@ Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still b
 <section id="tab-working" hidden>{splits_html or '<p class="sub">Not enough scored catches yet.</p>'}</section>
 <section id="tab-weather" hidden>{weather_html}</section>
 <section id="tab-news" hidden>{news_html}</section>
+</main>
 <script>
 (() => {{
   const tabs = [...document.querySelectorAll('button.tab')];
