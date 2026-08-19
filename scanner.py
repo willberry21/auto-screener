@@ -1010,7 +1010,6 @@ to trade. We're proving the edge first.</div>"""
 
     doc = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="300">
 <title>Runner Scanner — Project Lighthouse</title>
 <style>
 :root {{ color-scheme: light dark;
@@ -1037,6 +1036,7 @@ h2 {{ font-size:17px; margin:30px 0 14px; letter-spacing:-.01em; display:flex; a
 .tabs {{ position:sticky; top:0; z-index:20; display:flex; gap:8px; flex-wrap:wrap;
   margin:18px -20px 22px; padding:12px 20px; background:color-mix(in srgb,var(--bg) 86%,transparent);
   backdrop-filter:saturate(1.4) blur(10px); border-bottom:1px solid var(--line); }}
+.tablist {{ display:contents; }}
 .tab {{ background:var(--card); color:var(--txt); border:1px solid var(--line); border-radius:999px;
   padding:9px 18px; font-size:14px; font-weight:600; cursor:pointer; text-decoration:none;
   display:inline-block; transition:all .12s; }}
@@ -1118,14 +1118,16 @@ ul.news a:hover {{ color:var(--accent); }}
 <p class="sub">Catches low-float stocks the moment they move — no middleman, no late alerts ·
 scans every NASDAQ/NYSE stock every 15 minutes, pre-market included ·
 updated {now:%A, %B %-d %Y at %-I:%M %p ET}</p>
-<nav class="tabs">
-<button class="tab active" data-t="rocketed">🚀 Caught early</button>
-<button class="tab" data-t="tuner">🎯 Exit tuner</button>
-<button class="tab" data-t="catches">Runners</button>
-<button class="tab" data-t="inplay">In Play</button>
-<button class="tab" data-t="working">What's working</button>
-<button class="tab" data-t="weather">Market weather</button>
-<button class="tab" data-t="news">News</button>
+<nav class="tabs" aria-label="Scanner views">
+<div class="tablist" role="tablist">
+<button class="tab active" role="tab" aria-selected="true" aria-controls="tab-rocketed" data-t="rocketed"><span aria-hidden="true">🚀</span> Caught early</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-tuner" data-t="tuner"><span aria-hidden="true">🎯</span> Exit tuner</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-catches" data-t="catches">Runners</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-inplay" data-t="inplay">In Play</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-working" data-t="working">What&rsquo;s working</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-weather" data-t="weather">Market weather</button>
+<button class="tab" role="tab" aria-selected="false" aria-controls="tab-news" data-t="news">News</button>
+</div>
 <a class="tab" href="patterns.html">Chart patterns ↗</a>
 </nav>
 <section id="tab-rocketed">
@@ -1166,12 +1168,52 @@ Observation only, same honest scoring, {'' if len(ip_scored) >= 30 else 'still b
 <section id="tab-weather" hidden>{weather_html}</section>
 <section id="tab-news" hidden>{news_html}</section>
 <script>
-document.querySelectorAll('button.tab').forEach(b => b.addEventListener('click', () => {{
-  document.querySelectorAll('button.tab').forEach(x => x.classList.remove('active'));
-  b.classList.add('active');
-  document.querySelectorAll('section[id^=tab-]').forEach(s => s.hidden = true);
-  document.getElementById('tab-' + b.dataset.t).hidden = false;
-}}));
+(() => {{
+  const tabs = [...document.querySelectorAll('button.tab')];
+  const panels = [...document.querySelectorAll('section[id^=tab-]')];
+  panels.forEach(p => {{ p.setAttribute('role', 'tabpanel'); p.tabIndex = 0; }});
+
+  // Which tab you're on lives in the URL, so refresh / Back / a shared link all land right.
+  function show(name, remember) {{
+    const btn = tabs.find(b => b.dataset.t === name) || tabs[0];
+    tabs.forEach(b => {{
+      const on = b === btn;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }});
+    panels.forEach(p => {{ p.hidden = p.id !== 'tab-' + btn.dataset.t; }});
+    if (remember) history.replaceState(null, '', '#' + btn.dataset.t);
+  }}
+
+  tabs.forEach(b => b.addEventListener('click', () => show(b.dataset.t, true)));
+  addEventListener('hashchange', () => show(location.hash.slice(1), false));
+  show(location.hash.slice(1), false);
+
+  // Fresh numbers every 5 min without a page reload — keeps your scroll position,
+  // your tab, and any tables you've expanded. (This replaces the old meta refresh,
+  // which threw you back to the top of the page mid-read.)
+  async function softRefresh() {{
+    if (document.hidden) return;
+    try {{
+      const res = await fetch(location.pathname, {{cache: 'no-store'}});
+      if (!res.ok) return;
+      const next = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const wasOpen = [...document.querySelectorAll('details')].map(d => d.open);
+      panels.forEach(p => {{
+        const fresh = next.getElementById(p.id);
+        if (fresh) p.innerHTML = fresh.innerHTML;
+      }});
+      const sub = next.querySelector('p.sub');
+      if (sub) document.querySelector('p.sub').innerHTML = sub.innerHTML;
+      [...document.querySelectorAll('details')].forEach((d, i) => {{
+        if (wasOpen[i] !== undefined) d.open = wasOpen[i];
+      }});
+    }} catch (e) {{
+      // offline, or a deploy landed mid-fetch — just try again next tick
+    }}
+  }}
+  setInterval(softRefresh, 300000);
+}})();
 </script>
 <div class="foot">
 <b>What this is.</b> Project Lighthouse's own detector. It watches every stock on NASDAQ and NYSE
