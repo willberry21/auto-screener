@@ -233,12 +233,14 @@ def render(entries):
             if sc is not None:
                 pcls = "win" if sc > 0 else "loss"
                 pill = f'<span class="pill {pcls}">{sc * 100:+.0f}%</span>'
-            cards.append(f"""<div class="card" title="{e['ticker']} {e['date']} — peaked
-+{e['peak_pct'] * 100:.0f}% at {e['peak_min'] // 60}:{e['peak_min'] % 60:02d}, closed {e['close_pct'] * 100:+.0f}%">
+            # Everything here used to live in a title="" tooltip — hover-only, so it never
+            # showed on a phone and keyboard users never got it at all. It's visible text now.
+            cards.append(f"""<div class="card">
 <div class="chead"><b>{html.escape(e['ticker'])}</b>
 <span class="dt">{e['date'][5:]}</span>{pill}</div>
 {spark(e)}
-<div class="cfoot">peak +{e['peak_pct'] * 100:.0f}% · kept {f"{e['kept'] * 100:.0f}%" if e['kept'] is not None else "—"}</div>
+<div class="cfoot">peak +{e['peak_pct'] * 100:.0f}% at {e['peak_min'] // 60}:{e['peak_min'] % 60:02d} · kept {f"{e['kept'] * 100:.0f}%" if e['kept'] is not None else "—"}</div>
+<div class="cfoot">closed {e['close_pct'] * 100:+.0f}%</div>
 </div>""")
         sections.append(f"""<h2>{html.escape(label)}
 <span class="count">{len(g)} of {total}</span> {stat} {rw}</h2>
@@ -282,7 +284,11 @@ h2 {{ font-size:17px; margin:34px 0 12px; display:flex; align-items:center; gap:
 .legend {{ color:var(--dim); font-size:12.5px; margin:10px 0 0; }}
 .legend b {{ color:var(--txt); }}
 .foot {{ margin-top:40px; color:var(--dim); font-size:12px; line-height:1.7; max-width:860px; }}
+.back {{ display:inline-block; color:var(--dim); text-decoration:none; font-size:13px;
+  font-weight:600; margin-bottom:10px; }}
+.back:hover {{ color:var(--accent); }}
 </style></head><body><div class="wrap">
+<a class="back" href="index.html">&larr; Back to the scanner</a>
 <h1>📈 Chart Pattern Catalog</h1>
 <p class="sub">Every runner Lighthouse has ever caught, drawn as its actual day — one mini-chart per
 stock per day, all on the <b>same clock</b> (4:00 AM on the left edge, 4:00 PM on the right) so the
